@@ -432,6 +432,32 @@ jobs:
           fi
           echo "REMOTE_BRANCH=$REMOTE_BRANCH" >> $GITHUB_ENV
 
+      # ==================== 回退 GKI DRM 克隆校验 ====================
+      # GKI android12-5.10 从 5.10.238 起在 drivers/gpu/drm/drm_atomic_helper.c
+      # 引入了 drm_atomic_check_valid_clones() 校验：当 CRTC 的 encoder_mask
+      # 未被某个 encoder 的 possible_clones 完全覆盖时，atomic commit 会被判为
+      # -EINVAL 而失败。厂商显示驱动（小米 msm_drm + mi_disp 多编码器/虚拟屏
+      # 方案）不满足该假设，导致 mode commit 反复失败 -> 面板瞬时黑屏（闪屏）。
+      # 该补丁把行为还原为 5.10.237 及更早版本。
+      - name: 回退 GKI DRM 克隆校验补丁
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          PATCH="$GITHUB_WORKSPACE/patches/gki-drm-valid-clones-revert.patch"
+          if [ ! -f "$PATCH" ]; then
+            echo "未找到回退补丁，跳过。"
+            exit 0
+          fi
+          if ! grep -q 'drm_atomic_check_valid_clones' drivers/gpu/drm/drm_atomic_helper.c; then
+            echo "目标改动不存在（该 GKI 版本无需回退），跳过。"
+            exit 0
+          fi
+          if patch -p1 -R --forward < "$PATCH"; then
+            echo "已回退 GKI DRM 克隆校验（恢复 5.10.237 行为）"
+          else
+            echo "::error::回退 GKI DRM 克隆校验补丁失败"
+            exit 1
+          fi
+
       # ==================== 伪装 /proc/config.gz（自动检测） ====================
       # 若仓库存在 config/stock_defconfig，则自动应用；不存在则跳过
       - name: 应用 Stock Config 伪装
