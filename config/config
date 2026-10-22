@@ -13,11 +13,19 @@
 # ================================================================
 
 # 是否启用自定义提交 (true/false)
-custom=false
+custom=true
 
 # ==================== SUSFS 各分支的 commit hash ====================
 # 仅当 custom=true 时生效
-gki-android12-5.10=
+# gki-android12-5.10 固定在 31eb14a（2026-10-19）：
+#   5a3af83 及之后的 SUSFS 内核侧补丁依赖 KernelSU 侧补丁提供的
+#   my_setprocattr / my_write_context / my_write_access /
+#   ksu_preinit_handle_post_execveat / ksu_setup_preinit_file，
+#   而工作流对 BakaSU 变体不应用 10_enable_susfs_for_ksu.patch（BakaSU 用内置 SUSFS），
+#   BakaSU 各分支也没有 kernel/preinit/，因此链接必然失败（undefined symbol）。
+#   31eb14a 引用的 ksu_* 符号集合与已验证成功的 82f0835 完全一致，
+#   且已 rebase 到 android12-5.10.257，更适配 5.10.270 LTS。
+gki-android12-5.10=31eb14add587b0a089dfe1819f92cc94920e141e
 gki-android13-5.15=
 gki-android14-6.1=
 gki-android15-6.6=
