@@ -25,7 +25,7 @@ custom=true
 #   BakaSU 各分支也没有 kernel/preinit/，因此链接必然失败（undefined symbol）。
 #   31eb14a 引用的 ksu_* 符号集合与已验证成功的 82f0835 完全一致，
 #   且已 rebase 到 android12-5.10.257，更适配 5.10.270 LTS。
-gki-android12-5.10=31eb14add587b0a089dfe1819f92cc94920e141e
+gki-android12-5.10=c06d5f8ef2b53d04c5e1c6b86dc3076f1e0e9f33
 gki-android13-5.15=
 gki-android14-6.1=
 gki-android15-6.6=
