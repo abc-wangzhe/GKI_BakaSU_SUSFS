@@ -466,16 +466,22 @@ for index in "${!PATCH_FILES[@]}"; do
   done
 
   if PATCH_REVERSE_CHECK_OUTPUT="$(patch --batch --reverse --dry-run -p1 < "$PATCH_FILE" 2>&1)"; then
-    echo "::endgroup::"
-    echo "======================================================================"
-    echo "::group::✔ 自定义补丁已存在: $PATCH_NAME"
-    echo "当前源码已经包含该补丁的全部修改，跳过重复应用。"
-    echo "$PATCH_REVERSE_CHECK_OUTPUT"
-    echo "======================================================================"
-    echo "::endgroup::"
-    echo "======================================================================"
-    ALREADY_PRESENT_COUNT=$((ALREADY_PRESENT_COUNT + 1))
-    continue
+    # GNU patch 的 -R --dry-run 在"补丁尚未应用"的干净源码上也会成功
+    # （自动翻转方向做正向检测，输出 "Unreversed patch detected! Ignoring -R."）。
+    # 只有反向检测输出中不含该提示时，才能断定补丁确实已经应用过。
+    if ! echo "$PATCH_REVERSE_CHECK_OUTPUT" | grep -q "Unreversed patch detected"; then
+      echo "::endgroup::"
+      echo "======================================================================"
+      echo "::group::✔ 自定义补丁已存在: $PATCH_NAME"
+      echo "当前源码已经包含该补丁的全部修改，跳过重复应用。"
+      echo "$PATCH_REVERSE_CHECK_OUTPUT"
+      echo "======================================================================"
+      echo "::endgroup::"
+      echo "======================================================================"
+      ALREADY_PRESENT_COUNT=$((ALREADY_PRESENT_COUNT + 1))
+      continue
+    fi
+    echo "反向检测发现补丁尚未应用（patch 自动翻转所致），继续正常应用流程。"
   fi
 
   if PATCH_CHECK_OUTPUT="$(git apply --verbose --check "$PATCH_FILE" 2>&1)"; then
