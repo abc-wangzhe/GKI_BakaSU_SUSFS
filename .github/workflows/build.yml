@@ -1604,6 +1604,26 @@ jobs:
             set -ex
             cd "$KERNEL_ROOT"
 
+            # ==================== 修复宿主工具链接 ====================
+            # AOSP build.sh 会把 PATH 收窄为 build-tools/path + clang + gas，
+            # 当前 build 项目不再提供 ld，宿主工具（genheaders/fixdep 等）
+            # 链接时报 `Executable "ld" doesn't exist!`。把系统 ld（兜底
+            # clang 自带的 ld.lld）以符号链接补进 PATH 目录。
+            LD_SRC=""
+            for cand in /usr/bin/ld $(command -v ld 2>/dev/null) prebuilts-master/clang/host/linux-x86/clang-*/bin/ld.lld; do
+              [ -x "$cand" ] && LD_SRC="$cand" && break
+            done
+            if [ -n "$LD_SRC" ]; then
+              for ld_dir in build/build-tools/path/linux-x86 prebuilts-master/clang/host/linux-x86/clang-*/bin; do
+                if [ -d "$ld_dir" ] && [ ! -e "$ld_dir/ld" ]; then
+                  ln -sf "$LD_SRC" "$ld_dir/ld"
+                  echo "已补充 ld: $ld_dir/ld -> $LD_SRC"
+                fi
+              done
+            else
+              echo "::warning::未找到可用的 ld，宿主工具链接可能失败"
+            fi
+
             disable_werror_config() {
               local config_file="$1"
               if ! grep -q '^config WERROR$' common/init/Kconfig; then
@@ -1708,6 +1728,26 @@ jobs:
             echo "开始构建 Bypass 内核"
             set -ex
             cd "$KERNEL_ROOT"
+
+            # ==================== 修复宿主工具链接 ====================
+            # AOSP build.sh 会把 PATH 收窄为 build-tools/path + clang + gas，
+            # 当前 build 项目不再提供 ld，宿主工具（genheaders/fixdep 等）
+            # 链接时报 `Executable "ld" doesn't exist!`。把系统 ld（兜底
+            # clang 自带的 ld.lld）以符号链接补进 PATH 目录。
+            LD_SRC=""
+            for cand in /usr/bin/ld $(command -v ld 2>/dev/null) prebuilts-master/clang/host/linux-x86/clang-*/bin/ld.lld; do
+              [ -x "$cand" ] && LD_SRC="$cand" && break
+            done
+            if [ -n "$LD_SRC" ]; then
+              for ld_dir in build/build-tools/path/linux-x86 prebuilts-master/clang/host/linux-x86/clang-*/bin; do
+                if [ -d "$ld_dir" ] && [ ! -e "$ld_dir/ld" ]; then
+                  ln -sf "$LD_SRC" "$ld_dir/ld"
+                  echo "已补充 ld: $ld_dir/ld -> $LD_SRC"
+                fi
+              done
+            else
+              echo "::warning::未找到可用的 ld，宿主工具链接可能失败"
+            fi
 
             disable_werror_config() {
               local config_file="$1"
