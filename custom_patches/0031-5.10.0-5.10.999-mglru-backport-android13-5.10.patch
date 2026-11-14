@@ -2014,7 +2014,7 @@ index 16b2bc48211e..d495fa6f8418 100644
  
  		local_lock(&lru_pvecs.lock);
 diff --git a/mm/vmscan.c b/mm/vmscan.c
-index a5b9bce96948..ba97de53c2f3 100644
+index a5b9bce96948..b02012d63714 100644
 --- a/mm/vmscan.c
 +++ b/mm/vmscan.c
 @@ -51,6 +51,10 @@
@@ -2066,7 +2066,43 @@ index a5b9bce96948..ba97de53c2f3 100644
  		may_enter_fs = (sc->gfp_mask & __GFP_FS) ||
  			(PageSwapCache(page) && (sc->gfp_mask & __GFP_IO));
  
-@@ -2323,6 +2340,106 @@ enum scan_balance {
+@@ -1701,6 +1718,25 @@ static __always_inline void update_lru_sizes(struct lruvec *lruvec,
+ 
+ }
+ 
++#ifdef CONFIG_CMA
++/*
++ * It is waste of effort to scan and reclaim CMA pages if it is not available
++ * for current allocation context. Kswapd can not be enrolled as it can not
++ * distinguish this scenario by using sc->gfp_mask = GFP_KERNEL
++ */
++static bool skip_cma(struct page *page, struct scan_control *sc)
++{
++	return !current_is_kswapd() &&
++			gfp_migratetype(sc->gfp_mask) != MIGRATE_MOVABLE &&
++			get_pageblock_migratetype(page) == MIGRATE_CMA;
++}
++#else
++static bool skip_cma(struct page *page, struct scan_control *sc)
++{
++	return false;
++}
++#endif
++
+ /**
+  * pgdat->lru_lock is heavily contended.  Some of the functions that
+  * shrink the lists perform better by taking out a batch of pages
+@@ -1747,7 +1783,8 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
+ 		nr_pages = compound_nr(page);
+ 		total_scan += nr_pages;
+ 
+-		if (page_zonenum(page) > sc->reclaim_idx) {
++		if (page_zonenum(page) > sc->reclaim_idx ||
++				skip_cma(page, sc)) {
+ 			list_move(&page->lru, &pages_skipped);
+ 			nr_skipped[page_zonenum(page)] += nr_pages;
+ 			continue;
+@@ -2323,6 +2360,106 @@ enum scan_balance {
  	SCAN_FILE,
  };
  
@@ -2173,7 +2209,7 @@ index a5b9bce96948..ba97de53c2f3 100644
  /*
   * Determine how aggressively the anon and file LRU lists should be
   * scanned.  The relative value of each set of LRU lists is determined
-@@ -2535,164 +2652,2927 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
+@@ -2535,147 +2672,2910 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
  	}
  }
  
@@ -2187,12 +2223,9 @@ index a5b9bce96948..ba97de53c2f3 100644
 -	unsigned long nr_to_reclaim = sc->nr_to_reclaim;
 -	bool proportional_reclaim;
 -	struct blk_plug plug;
--
--	get_scan_count(lruvec, sc, nr);
 +#ifdef CONFIG_LRU_GEN
  
--	/* Record the original scan target for proportional adjustments later */
--	memcpy(targets, nr, sizeof(nr));
+-	get_scan_count(lruvec, sc, nr);
 +#ifdef CONFIG_LRU_GEN_ENABLED
 +DEFINE_STATIC_KEY_ARRAY_TRUE(lru_gen_caps, NR_LRU_GEN_CAPS);
 +#define get_cap(cap)	static_branch_likely(&lru_gen_caps[cap])
@@ -2200,6 +2233,12 @@ index a5b9bce96948..ba97de53c2f3 100644
 +DEFINE_STATIC_KEY_ARRAY_FALSE(lru_gen_caps, NR_LRU_GEN_CAPS);
 +#define get_cap(cap)	static_branch_unlikely(&lru_gen_caps[cap])
 +#endif
+ 
+-	/* Record the original scan target for proportional adjustments later */
+-	memcpy(targets, nr, sizeof(nr));
++/******************************************************************************
++ *                          shorthand helpers
++ ******************************************************************************/
  
 -	/*
 -	 * Global reclaiming within direct reclaim at DEF_PRIORITY is a normal
@@ -2214,45 +2253,45 @@ index a5b9bce96948..ba97de53c2f3 100644
 -	 */
 -	proportional_reclaim = (!cgroup_reclaim(sc) && !current_is_kswapd() &&
 -				sc->priority == DEF_PRIORITY);
-+/******************************************************************************
-+ *                          shorthand helpers
-+ ******************************************************************************/
++#define LRU_REFS_FLAGS	(BIT(PG_referenced) | BIT(PG_workingset))
  
 -	blk_start_plug(&plug);
 -	while (nr[LRU_INACTIVE_ANON] || nr[LRU_ACTIVE_FILE] ||
 -					nr[LRU_INACTIVE_FILE]) {
 -		unsigned long nr_anon, nr_file, percentage;
 -		unsigned long nr_scanned;
-+#define LRU_REFS_FLAGS	(BIT(PG_referenced) | BIT(PG_workingset))
++#define DEFINE_MAX_SEQ(lruvec)						\
++	unsigned long max_seq = READ_ONCE((lruvec)->lrugen.max_seq)
  
 -		for_each_evictable_lru(lru) {
 -			if (nr[lru]) {
 -				nr_to_scan = min(nr[lru], SWAP_CLUSTER_MAX);
 -				nr[lru] -= nr_to_scan;
-+#define DEFINE_MAX_SEQ(lruvec)						\
-+	unsigned long max_seq = READ_ONCE((lruvec)->lrugen.max_seq)
- 
--				nr_reclaimed += shrink_list(lru, nr_to_scan,
--							    lruvec, sc);
--			}
--		}
 +#define DEFINE_MIN_SEQ(lruvec)						\
 +	unsigned long min_seq[ANON_AND_FILE] = {			\
 +		READ_ONCE((lruvec)->lrugen.min_seq[LRU_GEN_ANON]),	\
 +		READ_ONCE((lruvec)->lrugen.min_seq[LRU_GEN_FILE]),	\
 +	}
  
--		cond_resched_tasks_rcu_qs();
+-				nr_reclaimed += shrink_list(lru, nr_to_scan,
+-							    lruvec, sc);
+-			}
+-		}
 +#define for_each_gen_type_zone(gen, type, zone)				\
 +	for ((gen) = 0; (gen) < MAX_NR_GENS; (gen)++)			\
 +		for ((type) = 0; (type) < ANON_AND_FILE; (type)++)	\
 +			for ((zone) = 0; (zone) < MAX_NR_ZONES; (zone)++)
  
--		if (nr_reclaimed < nr_to_reclaim || proportional_reclaim)
--			continue;
+-		cond_resched_tasks_rcu_qs();
 +static struct lruvec *get_lruvec(struct mem_cgroup *memcg, int nid)
 +{
 +	struct pglist_data *pgdat = NODE_DATA(nid);
+ 
+-		if (nr_reclaimed < nr_to_reclaim || proportional_reclaim)
+-			continue;
++#ifdef CONFIG_MEMCG
++	if (memcg) {
++		struct lruvec *lruvec = &memcg->nodeinfo[nid]->lruvec;
  
 -		/*
 -		 * For kswapd and memcg, reclaim at least the number of pages
@@ -2263,9 +2302,9 @@ index a5b9bce96948..ba97de53c2f3 100644
 -		 */
 -		nr_file = nr[LRU_INACTIVE_FILE] + nr[LRU_ACTIVE_FILE];
 -		nr_anon = nr[LRU_INACTIVE_ANON] + nr[LRU_ACTIVE_ANON];
-+#ifdef CONFIG_MEMCG
-+	if (memcg) {
-+		struct lruvec *lruvec = &memcg->nodeinfo[nid]->lruvec;
++		/* for hotadd_new_pgdat() */
++		if (!lruvec->pgdat)
++			lruvec->pgdat = pgdat;
  
 -		/*
 -		 * It's just vindictive to attack the larger once the smaller
@@ -2275,9 +2314,10 @@ index a5b9bce96948..ba97de53c2f3 100644
 -		 */
 -		if (!nr_file || !nr_anon)
 -			break;
-+		/* for hotadd_new_pgdat() */
-+		if (!lruvec->pgdat)
-+			lruvec->pgdat = pgdat;
++		return lruvec;
++	}
++#endif
++	VM_WARN_ON_ONCE(!mem_cgroup_disabled());
  
 -		if (nr_file > nr_anon) {
 -			unsigned long scan_target = targets[LRU_INACTIVE_ANON] +
@@ -2290,16 +2330,15 @@ index a5b9bce96948..ba97de53c2f3 100644
 -			lru = LRU_FILE;
 -			percentage = nr_file * 100 / scan_target;
 -		}
-+		return lruvec;
-+	}
-+#endif
-+	VM_WARN_ON_ONCE(!mem_cgroup_disabled());
++	return pgdat ? &pgdat->__lruvec : NULL;
++}
  
 -		/* Stop scanning the smaller of the LRU */
 -		nr[lru] = 0;
 -		nr[lru + LRU_ACTIVE] = 0;
-+	return pgdat ? &pgdat->__lruvec : NULL;
-+}
++static int get_swappiness(struct lruvec *lruvec, struct scan_control *sc)
++{
++	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
  
 -		/*
 -		 * Recalculate the other LRU scan count based on its original
@@ -2309,9 +2348,8 @@ index a5b9bce96948..ba97de53c2f3 100644
 -		nr_scanned = targets[lru] - nr[lru];
 -		nr[lru] = targets[lru] * (100 - percentage) / 100;
 -		nr[lru] -= min(nr[lru], nr_scanned);
-+static int get_swappiness(struct lruvec *lruvec, struct scan_control *sc)
-+{
-+	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
++	if (mem_cgroup_get_nr_swap_pages(memcg) <= 0)
++		return 0;
  
 -		lru += LRU_ACTIVE;
 -		nr_scanned = targets[lru] - nr[lru];
@@ -2320,8 +2358,8 @@ index a5b9bce96948..ba97de53c2f3 100644
 -	}
 -	blk_finish_plug(&plug);
 -	sc->nr_reclaimed += nr_reclaimed;
-+	if (mem_cgroup_get_nr_swap_pages(memcg) <= 0)
-+		return 0;
++	return mem_cgroup_swappiness(memcg);
++}
  
 -	/*
 -	 * Even if we did not try to evict anon pages at all, we want to
@@ -2330,27 +2368,44 @@ index a5b9bce96948..ba97de53c2f3 100644
 -	if (total_swap_pages && inactive_is_low(lruvec, LRU_INACTIVE_ANON))
 -		shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
 -				   sc, LRU_ACTIVE_ANON);
-+	return mem_cgroup_swappiness(memcg);
++static int get_nr_gens(struct lruvec *lruvec, int type)
++{
++	return lruvec->lrugen.max_seq - lruvec->lrugen.min_seq[type] + 1;
  }
  
 -/* Use reclaim/compaction for costly allocs or under memory pressure */
 -static bool in_reclaim_compaction(struct scan_control *sc)
-+static int get_nr_gens(struct lruvec *lruvec, int type)
++static bool __maybe_unused seq_is_valid(struct lruvec *lruvec)
  {
 -	if (gfp_compaction_allowed(sc->gfp_mask) && sc->order &&
 -			(sc->order > PAGE_ALLOC_COSTLY_ORDER ||
 -			 sc->priority < DEF_PRIORITY - 2))
 -		return true;
-+	return lruvec->lrugen.max_seq - lruvec->lrugen.min_seq[type] + 1;
-+}
- 
--	return false;
-+static bool __maybe_unused seq_is_valid(struct lruvec *lruvec)
-+{
 +	/* see the comment on lru_gen_struct */
 +	return get_nr_gens(lruvec, LRU_GEN_FILE) >= MIN_NR_GENS &&
 +	       get_nr_gens(lruvec, LRU_GEN_FILE) <= get_nr_gens(lruvec, LRU_GEN_ANON) &&
 +	       get_nr_gens(lruvec, LRU_GEN_ANON) <= MAX_NR_GENS;
++}
+ 
+-	return false;
++/******************************************************************************
++ *                          mm_struct list
++ ******************************************************************************/
++
++static struct lru_gen_mm_list *get_mm_list(struct mem_cgroup *memcg)
++{
++	static struct lru_gen_mm_list mm_list = {
++		.fifo = LIST_HEAD_INIT(mm_list.fifo),
++		.lock = __SPIN_LOCK_UNLOCKED(mm_list.lock),
++	};
++
++#ifdef CONFIG_MEMCG
++	if (memcg)
++		return &memcg->mm_list;
++#endif
++	VM_WARN_ON_ONCE(!mem_cgroup_disabled());
++
++	return &mm_list;
  }
  
 -/*
@@ -2363,53 +2418,18 @@ index a5b9bce96948..ba97de53c2f3 100644
 -static inline bool should_continue_reclaim(struct pglist_data *pgdat,
 -					unsigned long nr_reclaimed,
 -					struct scan_control *sc)
-+/******************************************************************************
-+ *                          mm_struct list
-+ ******************************************************************************/
-+
-+static struct lru_gen_mm_list *get_mm_list(struct mem_cgroup *memcg)
++void lru_gen_add_mm(struct mm_struct *mm)
  {
 -	unsigned long pages_for_compaction;
 -	unsigned long inactive_lru_pages;
 -	int z;
-+	static struct lru_gen_mm_list mm_list = {
-+		.fifo = LIST_HEAD_INIT(mm_list.fifo),
-+		.lock = __SPIN_LOCK_UNLOCKED(mm_list.lock),
-+	};
++	int nid;
++	struct mem_cgroup *memcg = get_mem_cgroup_from_mm(mm);
++	struct lru_gen_mm_list *mm_list = get_mm_list(memcg);
  
 -	/* If not in reclaim/compaction mode, stop */
 -	if (!in_reclaim_compaction(sc))
 -		return false;
-+#ifdef CONFIG_MEMCG
-+	if (memcg)
-+		return &memcg->mm_list;
-+#endif
-+	VM_WARN_ON_ONCE(!mem_cgroup_disabled());
- 
--	/*
--	 * Stop if we failed to reclaim any pages from the last SWAP_CLUSTER_MAX
--	 * number of pages that were scanned. This will return to the caller
--	 * with the risk reclaim/compaction and the resulting allocation attempt
--	 * fails. In the past we have tried harder for __GFP_RETRY_MAYFAIL
--	 * allocations through requiring that the full LRU list has been scanned
--	 * first, by assuming that zero delta of sc->nr_scanned means full LRU
--	 * scan, but that approximation was wrong, and there were corner cases
--	 * where always a non-zero amount of pages were scanned.
--	 */
--	if (!nr_reclaimed)
--		return false;
-+	return &mm_list;
-+}
- 
--	/* If compaction would go ahead or the allocation would succeed, stop */
--	for (z = 0; z <= sc->reclaim_idx; z++) {
--		struct zone *zone = &pgdat->node_zones[z];
-+void lru_gen_add_mm(struct mm_struct *mm)
-+{
-+	int nid;
-+	struct mem_cgroup *memcg = get_mem_cgroup_from_mm(mm);
-+	struct lru_gen_mm_list *mm_list = get_mm_list(memcg);
-+
 +	VM_WARN_ON_ONCE(!list_empty(&mm->lru_gen.list));
 +#ifdef CONFIG_MEMCG
 +	VM_WARN_ON_ONCE(mm->lru_gen.memcg);
@@ -3919,7 +3939,7 @@ index a5b9bce96948..ba97de53c2f3 100644
 +		success = lru_gen_del_page(lruvec, page, true);
 +		VM_WARN_ON_ONCE_PAGE(!success, page);
 +		SetPageUnevictable(page);
-+		add_page_to_lru_list(page, lruvec);
++		add_page_to_lru_list(page, lruvec, page_lru(page));
 +		__count_vm_events(UNEVICTABLE_PGCULLED, delta);
 +		return true;
 +	}
@@ -3929,7 +3949,7 @@ index a5b9bce96948..ba97de53c2f3 100644
 +		success = lru_gen_del_page(lruvec, page, true);
 +		VM_WARN_ON_ONCE_PAGE(!success, page);
 +		SetPageSwapBacked(page);
-+		add_page_to_lru_list_tail(page, lruvec);
++		add_page_to_lru_list_tail(page, lruvec, page_lru(page));
 +		return true;
 +	}
 +
@@ -4454,7 +4474,7 @@ index a5b9bce96948..ba97de53c2f3 100644
 +			VM_WARN_ON_ONCE_PAGE(page_is_file_lru(page) != type, page);
 +			VM_WARN_ON_ONCE_PAGE(page_lru_gen(page) != -1, page);
 +
-+			del_page_from_lru_list(page, lruvec);
++			del_page_from_lru_list(page, lruvec, page_lru(page));
 +			success = lru_gen_add_page(lruvec, page, false);
 +			VM_WARN_ON_ONCE(!success);
 +
@@ -4485,7 +4505,7 @@ index a5b9bce96948..ba97de53c2f3 100644
 +
 +			success = lru_gen_del_page(lruvec, page, false);
 +			VM_WARN_ON_ONCE(!success);
-+			add_page_to_lru_list(page, lruvec);
++			add_page_to_lru_list(page, lruvec, page_lru(page));
 +
 +			if (!--remaining)
 +				return false;
@@ -5215,27 +5235,10 @@ index a5b9bce96948..ba97de53c2f3 100644
 +	/* If not in reclaim/compaction mode, stop */
 +	if (!in_reclaim_compaction(sc))
 +		return false;
-+
-+	/*
-+	 * Stop if we failed to reclaim any pages from the last SWAP_CLUSTER_MAX
-+	 * number of pages that were scanned. This will return to the caller
-+	 * with the risk reclaim/compaction and the resulting allocation attempt
-+	 * fails. In the past we have tried harder for __GFP_RETRY_MAYFAIL
-+	 * allocations through requiring that the full LRU list has been scanned
-+	 * first, by assuming that zero delta of sc->nr_scanned means full LRU
-+	 * scan, but that approximation was wrong, and there were corner cases
-+	 * where always a non-zero amount of pages were scanned.
-+	 */
-+	if (!nr_reclaimed)
-+		return false;
-+
-+	/* If compaction would go ahead or the allocation would succeed, stop */
-+	for (z = 0; z <= sc->reclaim_idx; z++) {
-+		struct zone *zone = &pgdat->node_zones[z];
- 		if (!managed_zone(zone))
- 			continue;
  
-@@ -3105,6 +5985,9 @@ static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
+ 	/*
+ 	 * Stop if we failed to reclaim any pages from the last SWAP_CLUSTER_MAX
+@@ -3105,6 +6005,9 @@ static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
  	struct lruvec *target_lruvec;
  	unsigned long refaults;
  
@@ -5245,7 +5248,7 @@ index a5b9bce96948..ba97de53c2f3 100644
  	target_lruvec = mem_cgroup_lruvec(target_memcg, pgdat);
  	refaults = lruvec_page_state(target_lruvec, WORKINGSET_ACTIVATE_ANON);
  	target_lruvec->refaults[0] = refaults;
-@@ -3475,12 +6358,16 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
+@@ -3475,12 +6378,16 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
  EXPORT_SYMBOL_GPL(try_to_free_mem_cgroup_pages);
  #endif
  
@@ -5264,7 +5267,7 @@ index a5b9bce96948..ba97de53c2f3 100644
  	if (!total_swap_pages)
  		return;
  
-@@ -3764,12 +6651,11 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
+@@ -3764,12 +6671,11 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
  		sc.may_swap = !nr_boost_reclaim;
  
  		/*
