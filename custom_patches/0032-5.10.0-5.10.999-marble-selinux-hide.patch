@@ -1,24 +1,32 @@
-diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
-index d2566870e4ab..abff4c293ca4 100644
---- a/security/selinux/hooks.c
-+++ b/security/selinux/hooks.c
-@@ -6446,6 +6446,59 @@ static int selinux_getprocattr(struct task_struct *p,
- 	return error;
+diff --git a/security/security.c b/security/security.c
+index 98e1c8793b4e..acec99cdc39a 100644
+--- a/security/security.c
++++ b/security/security.c
+@@ -16,6 +16,8 @@
+ #include <linux/export.h>
+ #include <linux/init.h>
+ #include <linux/kernel.h>
++#include <linux/uidgid.h>
++#include <linux/cred.h>
+ #include <linux/kernel_read_file.h>
+ #include <linux/lsm_hooks.h>
+ #include <linux/integrity.h>
+@@ -1994,11 +1996,77 @@ int security_getprocattr(struct task_struct *p, const char *lsm, char *name,
+ 	return LSM_RET_DEFAULT(getprocattr);
  }
  
 +/*
-+ * marble: make root-tool contexts look non-existent to app processes.
++ * marble: answer root-tool context strings the way a stock policy would.
 + *
-+ * A detector writes candidate context strings to /proc/self/attr/current and
-+ * distinguishes "type exists" (EACCES from the PROCESS__SETCURRENT check)
-+ * from "type does not exist" (EINVAL from the parser). On a rooted device the
-+ * root-manager and hook-framework types exist, so they answer EACCES and the
-+ * detector learns the device is rooted even when every runtime trace is
-+ * hidden.
++ * Detection suites write candidate contexts to /proc/self/attr/current from an
++ * app_zygote/app carrier and distinguish "type exists" (EACCES from the
++ * PROCESS__SETCURRENT check) from "unknown type" (EINVAL). Rooted devices
++ * carry ksu/lsposed/magisk types, so those probes answer EACCES and reveal
++ * root even when every runtime artifact is hidden.
 + *
-+ * For app uids we therefore reject those strings as unknown types *before*
-+ * the permission check, which is exactly what a stock policy answers.
-+ * Root and system uids (ksud, init, system_server) are untouched.
++ * This hook lives in the LSM dispatch layer so it runs before any stacking
++ * hook (including the SUSFS-injected my_setprocattr) can answer for the
++ * hidden types. Only umounted app uids are affected.
 + */
 +static const char * const marble_hidden_proc_types[] = {
 +	"ksu", "ksu_file", "ksu_data",
@@ -28,7 +36,7 @@ index d2566870e4ab..abff4c293ca4 100644
 +	"adbroot", "droidspacesd", "msd_app", "msd_daemon",
 +};
 +
-+static bool marble_proc_context_hidden(const char *value, size_t size)
++static bool marble_selinux_hidden_type(const char *value, size_t size)
 +{
 +	const char *p, *type_start;
 +	size_t type_len;
@@ -36,7 +44,7 @@ index d2566870e4ab..abff4c293ca4 100644
 +
 +	if (uid_eq(current_uid(), GLOBAL_ROOT_UID) || current_uid().val < 10000)
 +		return false;
-+	if (!value || !size)
++	if (!value || size < 5)
 +		return false;
 +
 +	/* context layout: user:role:type[:sensitivity[:categories]] */
@@ -47,7 +55,7 @@ index d2566870e4ab..abff4c293ca4 100644
 +	if (!p)
 +		return false;
 +	type_start = p + 1;
-+	p = strchr(type_start, ':');
++	p = memchr(type_start, ':', size - (size_t)(type_start - (const char *)value));
 +	type_len = p ? (size_t)(p - type_start) : strlen(type_start);
 +
 +	for (i = 0; i < ARRAY_SIZE(marble_hidden_proc_types); i++) {
@@ -59,24 +67,28 @@ index d2566870e4ab..abff4c293ca4 100644
 +	return false;
 +}
 +
- static int selinux_setprocattr(const char *name, void *value, size_t size)
+ int security_setprocattr(const char *lsm, const char *name, void *value,
+ 			 size_t size)
  {
- 	struct task_security_struct *tsec;
-@@ -6454,6 +6507,14 @@ static int selinux_setprocattr(const char *name, void *value, size_t size)
- 	int error;
- 	char *str = value;
+ 	struct security_hook_list *hp;
  
 +	/*
-+	 * marble: answer hidden root-tool types the way a stock policy would
-+	 * (unknown type -> EINVAL) before the permission check can reveal
-+	 * that the type exists. See marble_proc_context_hidden().
++	 * marble: make root-manager / hook-framework types look like unknown
++	 * types to app processes. Placed before the stacking loop so no LSM
++	 * hook (SUSFS my_setprocattr included) can answer for them first.
 +	 */
-+	if (!strcmp(name, "current") && marble_proc_context_hidden(value, size))
++	/*
++	 * /proc/<pid>/attr/current is registered with lsm == NULL (see the
++	 * attr_dir_stuff table in fs/proc/base.c), so match on the bare name
++	 * and let each stacked hook see the call otherwise.
++	 */
++	if (!strcmp(name, "current") &&
++	    marble_selinux_hidden_type(value, size))
 +		return -EINVAL;
 +
- 	/*
- 	 * Basic control over ability to set these attributes at all.
- 	 */
+ 	hlist_for_each_entry(hp, &security_hook_heads.setprocattr, list) {
+ 		if (lsm != NULL && strcmp(lsm, hp->lsm))
+ 			continue;
 diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
 index 6fe9d0cea418..91631e2302a8 100644
 --- a/security/selinux/selinuxfs.c
