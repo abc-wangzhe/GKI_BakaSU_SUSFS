@@ -90,7 +90,7 @@ index 98e1c8793b4e..acec99cdc39a 100644
  		if (lsm != NULL && strcmp(lsm, hp->lsm))
  			continue;
 diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
-index 6fe9d0cea418..91631e2302a8 100644
+index 6fe9d0cea418..7f4e98c1327f 100644
 --- a/security/selinux/selinuxfs.c
 +++ b/security/selinux/selinuxfs.c
 @@ -29,6 +29,7 @@
@@ -165,19 +165,24 @@ index 6fe9d0cea418..91631e2302a8 100644
  static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
  {
  	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
-@@ -688,6 +746,11 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
- 	if (length)
- 		goto out;
+@@ -682,6 +740,16 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+ 	u32 sid, len;
+ 	ssize_t length;
  
++	/*
++	 * marble: answer hidden root-tool types as unknown *before* the
++	 * CHECK_CONTEXT permission test, so the reply is identical to a
++	 * policy that never carried those types (EINVAL, not EACCES).
++	 */
 +	if (marble_context_is_hidden(buf)) {
 +		length = -EINVAL;
 +		goto out;
 +	}
 +
- 	length = security_context_to_sid(state, buf, size, &sid, GFP_KERNEL);
- 	if (length)
- 		goto out;
-@@ -903,6 +966,35 @@ static const struct file_operations transaction_ops = {
+ 	length = avc_has_perm(&selinux_state,
+ 			      current_sid(), SECINITSID_SECURITY,
+ 			      SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
+@@ -903,6 +971,35 @@ static const struct file_operations transaction_ops = {
   * and the length returned.  Otherwise return 0 or and -error.
   */
  
@@ -213,7 +218,7 @@ index 6fe9d0cea418..91631e2302a8 100644
  static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  {
  	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
-@@ -933,6 +1025,11 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+@@ -933,6 +1030,11 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -225,7 +230,7 @@ index 6fe9d0cea418..91631e2302a8 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -943,6 +1040,20 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+@@ -943,6 +1045,20 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  
  	security_compute_av_user(state, ssid, tsid, tclass, &avd);
  
@@ -246,7 +251,7 @@ index 6fe9d0cea418..91631e2302a8 100644
  	length = scnprintf(buf, SIMPLE_TRANSACTION_LIMIT,
  			  "%x %x %x %x %u %x",
  			  avd.allowed, 0xffffffff,
-@@ -1024,6 +1135,11 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
+@@ -1024,6 +1140,11 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
  		objname = namebuf;
  	}
  
@@ -258,7 +263,7 @@ index 6fe9d0cea418..91631e2302a8 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -1090,6 +1206,11 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
+@@ -1090,6 +1211,11 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -270,7 +275,7 @@ index 6fe9d0cea418..91631e2302a8 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -1216,6 +1337,11 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
+@@ -1216,6 +1342,11 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -282,6 +287,136 @@ index 6fe9d0cea418..91631e2302a8 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
+diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
+index 0a5e197a2c75..7754b6abbcab 100644
+--- a/security/selinux/ss/services.c
++++ b/security/selinux/ss/services.c
+@@ -1172,6 +1172,105 @@ void security_compute_av(struct selinux_state *state,
+ 	goto out;
+ }
+ 
++#ifdef CONFIG_SECURITY_SELINUX
++/*
++ * marble: mask privileged edges out of app-visible AV queries.
++ *
++ * Detectors ask the live policy whether edges that only exist on a rooted
++ * device are allowed. Answering "denied" for them makes the device look
++ * stock. The check is by SELinux type name so ordinary file and process
++ * permissions are never touched: only the root-manager / hook-framework
++ * types and executable system_server memory are masked.
++ *
++ * PROCESS__EXECMEM is permission bit 25 of the "process" class and
++ * FILE__READ is bit 0 of "file" (see security/selinux/include/classmap.h).
++ */
++#define MARBLE_PROCESS_EXECMEM	(1U << 25)
++#define MARBLE_FILE_READ	(1U << 0)
++
++static const char * const marble_masked_type_names[] = {
++	"ksu", "ksu_file", "ksu_data",
++	"lsposed", "lsposed_file", "lsposed_data",
++	"magisk", "magisk_file", "magisk_data",
++	"xposed_file", "xposed_data",
++};
++
++/*
++ * Type values are resolved once per policy and cached: the lookup runs a
++ * string hash per name, which is far too expensive to repeat for every AV
++ * query on the hot path. The cache is keyed on the policy pointer so a
++ * reload re-resolves instead of using stale values.
++ */
++struct marble_masked_types {
++	struct policydb *policydb;
++	u32 values[ARRAY_SIZE(marble_masked_type_names)];
++	int count;
++};
++
++static struct marble_masked_types marble_cache;
++
++/* true when the type value maps to one of the masked names above */
++static bool marble_type_is_masked(struct policydb *policydb, u32 type)
++{
++	struct type_datum *datum;
++	int i;
++
++	if (!type)
++		return false;
++
++	if (marble_cache.policydb != policydb) {
++		marble_cache.policydb = policydb;
++		marble_cache.count = 0;
++		for (i = 0; i < ARRAY_SIZE(marble_masked_type_names); i++) {
++			datum = symtab_search(&policydb->p_types,
++					      marble_masked_type_names[i]);
++			if (datum)
++				marble_cache.values[marble_cache.count++] =
++					datum->value;
++		}
++	}
++
++	for (i = 0; i < marble_cache.count; i++) {
++		if (marble_cache.values[i] == type)
++			return true;
++	}
++	return false;
++}
++
++/*
++ * Returns true when the query was masked. Only consulted for app uids.
++ */
++static bool marble_mask_av_allowed(struct policydb *policydb, u32 s_type,
++				   u32 t_type, u16 tclass, u32 *allowed)
++{
++	u32 mask = 0;
++
++	if (uid_eq(current_uid(), GLOBAL_ROOT_UID) || current_uid().val < 10000)
++		return false;
++
++	if (tclass == SECCLASS_PROCESS) {
++		/*
++		 * Executable system_server memory. Stock denies it; a policy
++		 * patched for root reports it allowed.
++		 */
++		mask = MARBLE_PROCESS_EXECMEM;
++	} else if (tclass == SECCLASS_FILE) {
++		/* reads of root-manager / hook-framework file types */
++		if (!marble_type_is_masked(policydb, t_type))
++			return false;
++		mask = MARBLE_FILE_READ;
++	} else {
++		return false;
++	}
++
++	if (!(*allowed & mask))
++		return false;
++
++	*allowed &= ~mask;
++	return true;
++}
++#endif /* CONFIG_SECURITY_SELINUX */
++
+ void security_compute_av_user(struct selinux_state *state,
+ 			      u32 ssid,
+ 			      u32 tsid,
+@@ -1218,6 +1317,19 @@ void security_compute_av_user(struct selinux_state *state,
+ 
+ 	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
+ 				  NULL);
++
++	/*
++	 * marble: mask privileged edges for app-visible AV queries.
++	 *
++	 * Detectors ask the live policy whether edges only a rooted device
++	 * carries are allowed: executable system_server memory, and reads of
++	 * root-manager / hook-framework file types. This sits in the single
++	 * compute path every selinuxfs variant funnels through (including the
++	 * SUSFS-replaced sel_write_access), so the masked verdict is returned
++	 * no matter which wrapper handled the ioctl.
++	 */
++	marble_mask_av_allowed(policydb, scontext->type, tcontext->type,
++			       tclass, &avd->allowed);
+  out:
+ 	rcu_read_unlock();
+ 	return;
 diff --git a/security/selinux/status.c b/security/selinux/status.c
 index 4bc8f809934c..467ed8627f7b 100644
 --- a/security/selinux/status.c
