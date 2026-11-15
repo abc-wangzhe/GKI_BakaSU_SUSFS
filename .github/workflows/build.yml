@@ -463,46 +463,6 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/apply_custom_patches.sh" \
             "$GITHUB_WORKSPACE/custom_patches"
 
-      # ==================== SUSFS AV 屏蔽补丁 ====================
-      # BakaSU 开启 selinux_hide 时，SUSFS 用 susfs_sel_write_access()
-      # 与自己的 susfs_security_compute_av_user() 副本替换了上游实现，
-      # custom_patches 里的 0032 无法覆盖到这条路径。这里在 SUSFS 副本
-      # 末尾追加一行调用，让两条代码路径给出相同的屏蔽结果。
-      #
-      # 用行定位而非 patch 文件：SUSFS 补丁在 services.c 末尾插入约 800
-      # 行，任何 fuzz 都无法可靠跨过这个偏移，而 sed 按内容定位不受影响。
-      - name: 为 SUSFS compute_av 副本注入 AV 屏蔽
-        if: inputs.apply_custom_patches && inputs.cancel_susfs != true
-        working-directory: ${{ env.KERNEL_ROOT }}/common
-        run: |
-          set -e
-          F=security/selinux/ss/services.c
-          if [ ! -f "$F" ]; then
-            echo "未找到 $F，跳过。"
-            exit 0
-          fi
-          if ! grep -q 'susfs_security_compute_av_user' "$F"; then
-            echo "当前源码不含 SUSFS（cancel_susfs 或补丁未启用），跳过。"
-            exit 0
-          fi
-          if grep -q 'marble_mask_av_allowed(tcontext->type' "$F"; then
-            echo "SUSFS 副本已注入屏蔽调用，跳过。"
-            exit 0
-          fi
-          if ! grep -q '^void marble_mask_av_allowed' "$F"; then
-            echo "::error::未找到 marble_mask_av_allowed，0032 补丁未生效"
-            exit 1
-          fi
-          # 只在 SUSFS 副本里插入：定位唯一的那行 susfs_spoof_avd_allowed_rcu
-          # 调用，紧随其后写入屏蔽调用。
-          sed -i '/susfs_spoof_avd_allowed_rcu(scontext->type, tcontext->type, tclass, &avd->allowed);/a\	t/* marble: answer the same masked verdict on the SUSFS path */\n	marble_mask_av_allowed(tcontext->type, tclass, &avd->allowed);' "$F"
-          if ! grep -q 'marble_mask_av_allowed(tcontext->type' "$F"; then
-            echo "::error::注入失败"
-            exit 1
-          fi
-          echo "已为 SUSFS compute_av 副本注入 AV 屏蔽调用"
-          grep -n -A2 'susfs_spoof_avd_allowed_rcu(scontext->type' "$F" | head -5
-
       # ==================== 回退 GKI DRM 克隆校验 ====================
       # GKI android12-5.10 从 5.10.238 起在 drivers/gpu/drm/drm_atomic_helper.c
       # 引入了 drm_atomic_check_valid_clones() 校验：当 CRTC 的 encoder_mask
@@ -987,6 +947,46 @@ jobs:
               fi
             fi
           fi
+
+      # ==================== SUSFS AV 屏蔽补丁 ====================
+      # BakaSU 开启 selinux_hide 时，SUSFS 用 susfs_sel_write_access()
+      # 与自己的 susfs_security_compute_av_user() 副本替换了上游实现，
+      # custom_patches 里的 0032 无法覆盖到这条路径。这里在 SUSFS 副本
+      # 末尾追加一行调用，让两条代码路径给出相同的屏蔽结果。
+      #
+      # 用行定位而非 patch 文件：SUSFS 补丁在 services.c 末尾插入约 800
+      # 行，任何 fuzz 都无法可靠跨过这个偏移，而 sed 按内容定位不受影响。
+      - name: 为 SUSFS compute_av 副本注入 AV 屏蔽
+        if: inputs.apply_custom_patches && inputs.cancel_susfs != true
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          set -e
+          F=security/selinux/ss/services.c
+          if [ ! -f "$F" ]; then
+            echo "未找到 $F，跳过。"
+            exit 0
+          fi
+          if ! grep -q 'susfs_security_compute_av_user' "$F"; then
+            echo "当前源码不含 SUSFS（cancel_susfs 或补丁未启用），跳过。"
+            exit 0
+          fi
+          if grep -q 'marble_mask_av_allowed(tcontext->type' "$F"; then
+            echo "SUSFS 副本已注入屏蔽调用，跳过。"
+            exit 0
+          fi
+          if ! grep -q '^void marble_mask_av_allowed' "$F"; then
+            echo "::error::未找到 marble_mask_av_allowed，0032 补丁未生效"
+            exit 1
+          fi
+          # 只在 SUSFS 副本里插入：定位唯一的那行 susfs_spoof_avd_allowed_rcu
+          # 调用，紧随其后写入屏蔽调用。
+          sed -i '/susfs_spoof_avd_allowed_rcu(scontext->type, tcontext->type, tclass, &avd->allowed);/a\	t/* marble: answer the same masked verdict on the SUSFS path */\n	marble_mask_av_allowed(tcontext->type, tclass, &avd->allowed);' "$F"
+          if ! grep -q 'marble_mask_av_allowed(tcontext->type' "$F"; then
+            echo "::error::注入失败"
+            exit 1
+          fi
+          echo "已为 SUSFS compute_av 副本注入 AV 屏蔽调用"
+          grep -n -A2 'susfs_spoof_avd_allowed_rcu(scontext->type' "$F" | head -5
 
       - name: 克隆 Droidspaces 补丁仓库
         if: inputs.clean_build != true && inputs.droidspaces != 'off'
