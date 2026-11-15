@@ -2,7 +2,12 @@ diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
 index 9a7adf78c126..54c2b5841eec 100644
 --- a/security/selinux/ss/services.c
 +++ b/security/selinux/ss/services.c
-@@ -4385,6 +4385,8 @@ void susfs_security_compute_av_user(struct selinux_state *state,
+@@ -4380,16 +4380,18 @@ void susfs_security_compute_av_user(struct selinux_state *state,
+ 		if (policydb->allow_unknown)
+ 			goto allow;
+ 		goto out;
+ 	}
+ 
  	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
  				  NULL);
  	susfs_spoof_avd_allowed_rcu(scontext->type, tcontext->type, tclass, &avd->allowed);
@@ -11,3 +16,8 @@ index 9a7adf78c126..54c2b5841eec 100644
   out:
  	rcu_read_unlock();
  	return;
+ allow:
+ 	avd->allowed = 0xffffffff;
+ 	goto out;
+ }
+ #endif // #ifdef CONFIG_KSU_SUSFS
