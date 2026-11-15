@@ -288,7 +288,7 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  	if (length)
  		goto out;
 diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
-index 0a5e197a2c75..84b47745e533 100644
+index 0a5e197a2c75..0b5478690b33 100644
 --- a/security/selinux/ss/services.c
 +++ b/security/selinux/ss/services.c
 @@ -1172,6 +1172,89 @@ void security_compute_av(struct selinux_state *state,
@@ -328,7 +328,7 @@ index 0a5e197a2c75..84b47745e533 100644
 +static u32 marble_masked_type_values[MARBLE_MASKED_TYPE_NR];
 +static u32 marble_masked_type_valid;
 +
-+static void marble_resolve_masked_types(struct policydb *policydb)
++void marble_resolve_masked_types(struct policydb *policydb)
 +{
 +	struct type_datum *datum;
 +	u32 i;
@@ -357,7 +357,7 @@ index 0a5e197a2c75..84b47745e533 100644
 +	return false;
 +}
 +
-+static void marble_mask_av_allowed(u32 t_type, u16 tclass, u32 *allowed)
++void marble_mask_av_allowed(u32 t_type, u16 tclass, u32 *allowed)
 +{
 +	u32 mask;
 +
