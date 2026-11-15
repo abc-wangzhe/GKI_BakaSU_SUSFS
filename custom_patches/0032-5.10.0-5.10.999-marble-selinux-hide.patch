@@ -288,10 +288,10 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  	if (length)
  		goto out;
 diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
-index 0a5e197a2c75..7754b6abbcab 100644
+index 0a5e197a2c75..84b47745e533 100644
 --- a/security/selinux/ss/services.c
 +++ b/security/selinux/ss/services.c
-@@ -1172,6 +1172,105 @@ void security_compute_av(struct selinux_state *state,
+@@ -1172,6 +1172,89 @@ void security_compute_av(struct selinux_state *state,
  	goto out;
  }
  
@@ -299,17 +299,22 @@ index 0a5e197a2c75..7754b6abbcab 100644
 +/*
 + * marble: mask privileged edges out of app-visible AV queries.
 + *
-+ * Detectors ask the live policy whether edges that only exist on a rooted
-+ * device are allowed. Answering "denied" for them makes the device look
-+ * stock. The check is by SELinux type name so ordinary file and process
-+ * permissions are never touched: only the root-manager / hook-framework
-+ * types and executable system_server memory are masked.
++ * Two exposure families make a rooted device distinguishable from stock:
 + *
-+ * PROCESS__EXECMEM is permission bit 25 of the "process" class and
-+ * FILE__READ is bit 0 of "file" (see security/selinux/include/classmap.h).
++ *   1. PROCESS__EXECMEM between system_server and itself. Stock denies
++ *      executable system_server memory; a policy patched by a root solution
++ *      reports it allowed and DirtySepolicy-style oracles read that as proof.
++ *
++ *   2. FILE__READ against root-manager / hook-framework file types that only
++ *      exist on a rooted device.
++ *
++ * Only app uids see the masked verdict, so init, system_server, ksud and the
++ * root shell keep the real policy. Type values are resolved once when the
++ * policy loads and afterwards compared as integers, which is RCU-safe and free
++ * on the hot path.
 + */
-+#define MARBLE_PROCESS_EXECMEM	(1U << 25)
-+#define MARBLE_FILE_READ	(1U << 0)
++#define MARBLE_PROCESS_EXECMEM	(1U << 25)	/* process class: execmem */
++#define MARBLE_FILE_READ	(1U << 0)	/* file class: read */
 +
 +static const char * const marble_masked_type_names[] = {
 +	"ksu", "ksu_file", "ksu_data",
@@ -318,105 +323,83 @@ index 0a5e197a2c75..7754b6abbcab 100644
 +	"xposed_file", "xposed_data",
 +};
 +
-+/*
-+ * Type values are resolved once per policy and cached: the lookup runs a
-+ * string hash per name, which is far too expensive to repeat for every AV
-+ * query on the hot path. The cache is keyed on the policy pointer so a
-+ * reload re-resolves instead of using stale values.
-+ */
-+struct marble_masked_types {
-+	struct policydb *policydb;
-+	u32 values[ARRAY_SIZE(marble_masked_type_names)];
-+	int count;
-+};
++#define MARBLE_MASKED_TYPE_NR ARRAY_SIZE(marble_masked_type_names)
 +
-+static struct marble_masked_types marble_cache;
++static u32 marble_masked_type_values[MARBLE_MASKED_TYPE_NR];
++static u32 marble_masked_type_valid;
 +
-+/* true when the type value maps to one of the masked names above */
-+static bool marble_type_is_masked(struct policydb *policydb, u32 type)
++static void marble_resolve_masked_types(struct policydb *policydb)
 +{
 +	struct type_datum *datum;
-+	int i;
++	u32 i;
++
++	marble_masked_type_valid = 0;
++	for (i = 0; i < MARBLE_MASKED_TYPE_NR; i++) {
++		datum = symtab_search(&policydb->p_types,
++				      marble_masked_type_names[i]);
++		if (datum)
++			marble_masked_type_values[marble_masked_type_valid++] =
++				datum->value;
++	}
++}
++
++static bool marble_type_is_masked(u32 type)
++{
++	u32 i;
 +
 +	if (!type)
 +		return false;
 +
-+	if (marble_cache.policydb != policydb) {
-+		marble_cache.policydb = policydb;
-+		marble_cache.count = 0;
-+		for (i = 0; i < ARRAY_SIZE(marble_masked_type_names); i++) {
-+			datum = symtab_search(&policydb->p_types,
-+					      marble_masked_type_names[i]);
-+			if (datum)
-+				marble_cache.values[marble_cache.count++] =
-+					datum->value;
-+		}
-+	}
-+
-+	for (i = 0; i < marble_cache.count; i++) {
-+		if (marble_cache.values[i] == type)
++	for (i = 0; i < marble_masked_type_valid; i++) {
++		if (marble_masked_type_values[i] == type)
 +			return true;
 +	}
 +	return false;
 +}
 +
-+/*
-+ * Returns true when the query was masked. Only consulted for app uids.
-+ */
-+static bool marble_mask_av_allowed(struct policydb *policydb, u32 s_type,
-+				   u32 t_type, u16 tclass, u32 *allowed)
++static void marble_mask_av_allowed(u32 t_type, u16 tclass, u32 *allowed)
 +{
-+	u32 mask = 0;
++	u32 mask;
 +
 +	if (uid_eq(current_uid(), GLOBAL_ROOT_UID) || current_uid().val < 10000)
-+		return false;
++		return;
 +
 +	if (tclass == SECCLASS_PROCESS) {
-+		/*
-+		 * Executable system_server memory. Stock denies it; a policy
-+		 * patched for root reports it allowed.
-+		 */
 +		mask = MARBLE_PROCESS_EXECMEM;
 +	} else if (tclass == SECCLASS_FILE) {
-+		/* reads of root-manager / hook-framework file types */
-+		if (!marble_type_is_masked(policydb, t_type))
-+			return false;
++		if (!marble_type_is_masked(t_type))
++			return;
 +		mask = MARBLE_FILE_READ;
 +	} else {
-+		return false;
++		return;
 +	}
 +
-+	if (!(*allowed & mask))
-+		return false;
-+
 +	*allowed &= ~mask;
-+	return true;
 +}
 +#endif /* CONFIG_SECURITY_SELINUX */
 +
  void security_compute_av_user(struct selinux_state *state,
  			      u32 ssid,
  			      u32 tsid,
-@@ -1218,6 +1317,19 @@ void security_compute_av_user(struct selinux_state *state,
+@@ -1218,6 +1301,8 @@ void security_compute_av_user(struct selinux_state *state,
  
  	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
  				  NULL);
-+
-+	/*
-+	 * marble: mask privileged edges for app-visible AV queries.
-+	 *
-+	 * Detectors ask the live policy whether edges only a rooted device
-+	 * carries are allowed: executable system_server memory, and reads of
-+	 * root-manager / hook-framework file types. This sits in the single
-+	 * compute path every selinuxfs variant funnels through (including the
-+	 * SUSFS-replaced sel_write_access), so the masked verdict is returned
-+	 * no matter which wrapper handled the ioctl.
-+	 */
-+	marble_mask_av_allowed(policydb, scontext->type, tcontext->type,
-+			       tclass, &avd->allowed);
++	/* marble: hide rooted-device-only edges from app AV queries */
++	marble_mask_av_allowed(tcontext->type, tclass, &avd->allowed);
   out:
  	rcu_read_unlock();
  	return;
+@@ -2319,6 +2404,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
+ 		goto err_mapping;
+ 	}
+ 
++	/* marble: resolve the type values we hide from app AV queries */
++	marble_resolve_masked_types(&newpolicy->policydb);
++
+ 	if (!selinux_initialized(state)) {
+ 		/* First policy load, so no need to preserve state from old policy */
+ 		load_state->policy = newpolicy;
 diff --git a/security/selinux/status.c b/security/selinux/status.c
 index 4bc8f809934c..467ed8627f7b 100644
 --- a/security/selinux/status.c
