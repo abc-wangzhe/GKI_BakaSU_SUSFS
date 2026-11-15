@@ -78,7 +78,7 @@ index d2566870e4ab..abff4c293ca4 100644
  	 * Basic control over ability to set these attributes at all.
  	 */
 diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
-index 6fe9d0cea418..5f63ab600efd 100644
+index 6fe9d0cea418..91631e2302a8 100644
 --- a/security/selinux/selinuxfs.c
 +++ b/security/selinux/selinuxfs.c
 @@ -29,6 +29,7 @@
@@ -89,21 +89,9 @@ index 6fe9d0cea418..5f63ab600efd 100644
  #include <linux/kobject.h>
  #include <linux/ctype.h>
  
-@@ -688,6 +689,11 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
- 	if (length)
- 		goto out;
- 
-+	if (marble_context_is_hidden(buf)) {
-+		length = -EINVAL;
-+		goto out;
-+	}
-+
- 	length = security_context_to_sid(state, buf, size, &sid, GFP_KERNEL);
- 	if (length)
- 		goto out;
-@@ -903,6 +909,92 @@ static const struct file_operations transaction_ops = {
-  * and the length returned.  Otherwise return 0 or and -error.
-  */
+@@ -674,6 +675,63 @@ static const struct file_operations sel_load_ops = {
+ 	.llseek		= generic_file_llseek,
+ };
  
 +/*
 + * marble: hide root-tool SELinux types from app-visible selinuxfs probes.
@@ -162,6 +150,25 @@ index 6fe9d0cea418..5f63ab600efd 100644
 +	return false;
 +}
 +
+ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+ {
+ 	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
+@@ -688,6 +746,11 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+ 	if (length)
+ 		goto out;
+ 
++	if (marble_context_is_hidden(buf)) {
++		length = -EINVAL;
++		goto out;
++	}
++
+ 	length = security_context_to_sid(state, buf, size, &sid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+@@ -903,6 +966,35 @@ static const struct file_operations transaction_ops = {
+  * and the length returned.  Otherwise return 0 or and -error.
+  */
+ 
 +/*
 + * marble: mask privileged permission bits out of selinuxfs access replies.
 + *
