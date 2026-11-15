@@ -465,6 +465,7 @@ for index in "${!PATCH_FILES[@]}"; do
     echo "  - $relative_path"
   done
 
+  USE_PATCH_FALLBACK=0
   if PATCH_REVERSE_CHECK_OUTPUT="$(patch --batch --reverse --dry-run -p1 < "$PATCH_FILE" 2>&1)"; then
     # GNU patch 的 -R --dry-run 在"补丁尚未应用"的干净源码上也会成功
     # （自动翻转方向做正向检测，输出 "Unreversed patch detected! Ignoring -R."）。
@@ -487,6 +488,13 @@ for index in "${!PATCH_FILES[@]}"; do
   if PATCH_CHECK_OUTPUT="$(git apply --verbose --check "$PATCH_FILE" 2>&1)"; then
     echo "$PATCH_CHECK_OUTPUT"
     echo "补丁检查通过。"
+  elif PATCH_FUZZ_CHECK="$(patch -p1 --dry-run --forward --fuzz=3 --ignore-whitespace < "$PATCH_FILE" 2>&1)"; then
+    # GNU patch tolerates small offsets / whitespace drift that git apply
+    # rejects outright. Handy for patches that touch files another patch
+    # rewrote earlier in the same run (e.g. a SUSFS-injected copy).
+    echo "$PATCH_FUZZ_CHECK"
+    echo "git apply 严格检查未通过，patch --fuzz=3 可用，改用 patch 应用。"
+    USE_PATCH_FALLBACK=1
   else
     PATCH_EXIT_CODE=$?
     if ! log_patch_failure \
@@ -520,7 +528,24 @@ for index in "${!PATCH_FILES[@]}"; do
     fi
   done
 
-  if PATCH_APPLY_OUTPUT="$(git apply --verbose "$PATCH_FILE" 2>&1)"; then
+  if [[ "${USE_PATCH_FALLBACK:-0}" = "1" ]]; then
+    PATCH_APPLY_OUTPUT="$(patch -p1 --forward --fuzz=3 --ignore-whitespace < "$PATCH_FILE" 2>&1)"
+    PATCH_APPLY_RC=$?
+    if [[ $PATCH_APPLY_RC -eq 0 ]]; then
+      echo "$PATCH_APPLY_OUTPUT"
+      echo "已通过 patch --fuzz=3 应用。"
+    else
+      PATCH_EXIT_CODE=$PATCH_APPLY_RC
+      if ! log_patch_failure \
+        "应用（patch fallback）" \
+        "$PATCH_EXIT_CODE" \
+        "patch -p1 --forward --fuzz=3 < $PATCH_FILE" \
+        "$PATCH_APPLY_OUTPUT"; then
+        exit 1
+      fi
+      continue
+    fi
+  elif PATCH_APPLY_OUTPUT="$(git apply --verbose "$PATCH_FILE" 2>&1)"; then
     if [[ -n "$PATCH_APPLY_OUTPUT" ]]; then
       echo "$PATCH_APPLY_OUTPUT"
     fi
