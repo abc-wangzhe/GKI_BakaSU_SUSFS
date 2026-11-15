@@ -1,23 +1,8 @@
-marble: apply AV masking inside SUSFS's compute_av copy
-
-When BakaSU's selinux_hide feature is enabled, SUSFS installs
-susfs_sel_write_access()/susfs_sel_write_context() in place of the upstream
-selinuxfs handlers, and answers access queries through its own
-susfs_security_compute_av_user() copy in ss/services.c. That copy never calls
-security_compute_av_user(), so the masking added by 0032 does not run for
-app_zygote carriers and detectors still read these edges as allowed:
-
-  system_server -> system_server : process execmem
-  untrusted_app -> ksu_file      : file    read
-  untrusted_app -> lsposed_file  : file    read
-
-Call the same masking helper from the SUSFS copy so both code paths answer
-identically. The helper already limits itself to app uids and to the
-root-manager / hook-framework types, so nothing outside those edges changes.
-
+diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
+index 9a7adf78c126..54c2b5841eec 100644
 --- a/security/selinux/ss/services.c
 +++ b/security/selinux/ss/services.c
-@@ -3576,6 +3576,8 @@ void susfs_security_compute_av_user(struct selinux_state *state,
+@@ -4385,6 +4385,8 @@ void susfs_security_compute_av_user(struct selinux_state *state,
  	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
  				  NULL);
  	susfs_spoof_avd_allowed_rcu(scontext->type, tcontext->type, tclass, &avd->allowed);
