@@ -1009,13 +1009,16 @@ jobs:
             echo "当前源码不含 SUSFS status 钩子，跳过。"
             exit 0
           fi
-          if grep -q 'seqno ? seqno : 1' "$F"; then
-            echo "policyload 已钳制，跳过。"
+          # 0032 已经改过 update_policyload 的普通分支，这里要处理的是
+          # SUSFS 在函数开头插入的 ksu 域分支，它仍是原样的
+          # "status->policyload = seqno;"。因此按该精确形态判断幂等。
+          if ! grep -q 'status->policyload = seqno;' "$F"; then
+            echo "SUSFS 分支的 policyload 已钳制或无该分支，跳过。"
             exit 0
           fi
           awk '/status->policyload = seqno;/{sub(/= seqno;/, "= seqno ? seqno : 1;"); print; next} {print}' "$F" > "$F.new" && mv "$F.new" "$F"
-          if ! grep -q 'seqno ? seqno : 1' "$F"; then
-            echo "::error::policyload 钳制失败"
+          if grep -q 'status->policyload = seqno;' "$F"; then
+            echo "::error::policyload 钳制失败：仍存在未钳制的赋值"
             exit 1
           fi
           echo "已钳制 SUSFS 写入的 policyload"
