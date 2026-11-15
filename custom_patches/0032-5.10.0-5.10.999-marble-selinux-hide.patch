@@ -332,10 +332,10 @@ index 6fe9d0cea418..b5822797ba6e 100644
  	if (length)
  		goto out;
 diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
-index 0a5e197a2c75..b7e25dbd0c07 100644
+index 0a5e197a2c75..5e1f8cc4f513 100644
 --- a/security/selinux/ss/services.c
 +++ b/security/selinux/ss/services.c
-@@ -1172,6 +1172,157 @@ void security_compute_av(struct selinux_state *state,
+@@ -1172,6 +1172,154 @@ void security_compute_av(struct selinux_state *state,
  	goto out;
  }
  
@@ -453,9 +453,6 @@ index 0a5e197a2c75..b7e25dbd0c07 100644
 +{
 +	u32 mask;
 +
-+	pr_info_ratelimited("marble: mask called tclass=%u uid=%u proc=%d file=%d
-+",
-+			    tclass, current_uid().val, SECCLASS_PROCESS, SECCLASS_FILE);
 +
 +	if (uid_eq(current_uid(), GLOBAL_ROOT_UID) || current_uid().val < 10000)
 +		return;
@@ -493,7 +490,7 @@ index 0a5e197a2c75..b7e25dbd0c07 100644
  void security_compute_av_user(struct selinux_state *state,
  			      u32 ssid,
  			      u32 tsid,
-@@ -1218,6 +1369,8 @@ void security_compute_av_user(struct selinux_state *state,
+@@ -1218,6 +1366,8 @@ void security_compute_av_user(struct selinux_state *state,
  
  	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
  				  NULL);
@@ -502,7 +499,7 @@ index 0a5e197a2c75..b7e25dbd0c07 100644
   out:
  	rcu_read_unlock();
  	return;
-@@ -2319,6 +2472,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
+@@ -2319,6 +2469,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
  		goto err_mapping;
  	}
  
