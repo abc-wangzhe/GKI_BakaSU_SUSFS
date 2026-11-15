@@ -90,7 +90,7 @@ index 98e1c8793b4e..acec99cdc39a 100644
  		if (lsm != NULL && strcmp(lsm, hp->lsm))
  			continue;
 diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
-index 6fe9d0cea418..7f4e98c1327f 100644
+index 6fe9d0cea418..0ca255f9bc19 100644
 --- a/security/selinux/selinuxfs.c
 +++ b/security/selinux/selinuxfs.c
 @@ -29,6 +29,7 @@
@@ -101,7 +101,36 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  #include <linux/kobject.h>
  #include <linux/ctype.h>
  
-@@ -674,6 +675,63 @@ static const struct file_operations sel_load_ops = {
+@@ -400,6 +401,17 @@ static int sel_open_policy(struct inode *inode, struct file *filp)
+ 
+ 	mutex_lock(&fsi->state->policy_mutex);
+ 
++	/*
++	 * marble: the raw policy binary leaks every injected type and rule to
++	 * whoever can read it. Detection suites read it from app uids, which
++	 * stock policy never allows for a plain app; answer the same way before
++	 * the permission check so the reply is identical to stock SELinux.
++	 */
++	if (marble_is_app_uid()) {
++		rc = -EACCES;
++		goto err;
++	}
++
+ 	rc = avc_has_perm(&selinux_state,
+ 			  current_sid(), SECINITSID_SECURITY,
+ 			  SECCLASS_SECURITY, SECURITY__READ_POLICY, NULL);
+@@ -462,6 +474,10 @@ static ssize_t sel_read_policy(struct file *filp, char __user *buf,
+ 	struct policy_load_memory *plm = filp->private_data;
+ 	int ret;
+ 
++	/* marble: never hand the raw policy to an app uid */
++	if (marble_is_app_uid())
++		return -EACCES;
++
+ 	ret = avc_has_perm(&selinux_state,
+ 			   current_sid(), SECINITSID_SECURITY,
+ 			  SECCLASS_SECURITY, SECURITY__READ_POLICY, NULL);
+@@ -674,6 +690,63 @@ static const struct file_operations sel_load_ops = {
  	.llseek		= generic_file_llseek,
  };
  
@@ -165,7 +194,7 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
  {
  	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
-@@ -682,6 +740,16 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+@@ -682,6 +755,16 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
  	u32 sid, len;
  	ssize_t length;
  
@@ -182,7 +211,7 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  	length = avc_has_perm(&selinux_state,
  			      current_sid(), SECINITSID_SECURITY,
  			      SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
-@@ -903,6 +971,35 @@ static const struct file_operations transaction_ops = {
+@@ -903,6 +986,35 @@ static const struct file_operations transaction_ops = {
   * and the length returned.  Otherwise return 0 or and -error.
   */
  
@@ -218,7 +247,7 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  {
  	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
-@@ -933,6 +1030,11 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+@@ -933,6 +1045,11 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -230,7 +259,7 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -943,6 +1045,20 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+@@ -943,6 +1060,20 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  
  	security_compute_av_user(state, ssid, tsid, tclass, &avd);
  
@@ -251,7 +280,7 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  	length = scnprintf(buf, SIMPLE_TRANSACTION_LIMIT,
  			  "%x %x %x %x %u %x",
  			  avd.allowed, 0xffffffff,
-@@ -1024,6 +1140,11 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
+@@ -1024,6 +1155,11 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
  		objname = namebuf;
  	}
  
@@ -263,7 +292,7 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -1090,6 +1211,11 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
+@@ -1090,6 +1226,11 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -275,7 +304,7 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -1216,6 +1342,11 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
+@@ -1216,6 +1357,11 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -288,10 +317,10 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  	if (length)
  		goto out;
 diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
-index 0a5e197a2c75..429068c1f4bd 100644
+index 0a5e197a2c75..b7e25dbd0c07 100644
 --- a/security/selinux/ss/services.c
 +++ b/security/selinux/ss/services.c
-@@ -1172,6 +1172,114 @@ void security_compute_av(struct selinux_state *state,
+@@ -1172,6 +1172,157 @@ void security_compute_av(struct selinux_state *state,
  	goto out;
  }
  
@@ -313,6 +342,17 @@ index 0a5e197a2c75..429068c1f4bd 100644
 + * policy loads and afterwards compared as integers, which is RCU-safe and free
 + * on the hot path.
 + */
++/*
++ * Permission bit positions. These come from security/selinux/include/
++ * classmap.h, which is the single source of truth for class/perm numbering:
++ *
++ *   process: fork, transition, ..., setcurrent, execmem(25), execstack, ...
++ *   file   : ioctl, read(0), write, ...
++ *
++ * If a future kernel inserts a permission before these entries the mask would
++ * silently target the wrong bit, so the values are re-derived from classmap.h
++ * whenever this patch is rebased (see MARBLE_CHECK_* below).
++ */
 +#define MARBLE_PROCESS_EXECMEM	(1U << 25)	/* process class: execmem */
 +#define MARBLE_FILE_READ	(1U << 0)	/* file class: read */
 +
@@ -322,6 +362,19 @@ index 0a5e197a2c75..429068c1f4bd 100644
 +	"magisk", "magisk_file", "magisk_data",
 +	"xposed_file", "xposed_data",
 +};
++
++/*
++ * marble: the one allow rule that only exists because this device is rooted
++ * and that detection suites still flag: the loop driver reading the zram
++ * writeback file under /data/adb (granted through a sepolicy patch from the
++ * performance tuning script). A stock kernel never carries it, so report the
++ * stock verdict to app queries as well.
++ *
++ * Kept separate from marble_masked_type_names because that list drives the
++ * read-bit masking for root-manager types; this one only needs the object
++ * type value.
++ */
++static u32 marble_adb_data_file_type;
 +
 +#define MARBLE_MASKED_TYPE_NR ARRAY_SIZE(marble_masked_type_names)
 +
@@ -335,8 +388,17 @@ index 0a5e197a2c75..429068c1f4bd 100644
 +	u32 v, i;
 +
 +	marble_masked_type_valid = 0;
++	marble_adb_data_file_type = 0;
 +	if (!policydb || !policydb->type_val_to_struct)
 +		return;
++
++	{
++		struct type_datum *adb = symtab_search(&policydb->p_types,
++						       "adb_data_file");
++
++		if (adb)
++			marble_adb_data_file_type = adb->value;
++	}
 +
 +	/* Walk the type table once instead of hashing each name: works even
 +	 * when the symtab hashing setup differs (as on a built-in policy). */
@@ -376,6 +438,10 @@ index 0a5e197a2c75..429068c1f4bd 100644
 +{
 +	u32 mask;
 +
++	pr_info_ratelimited("marble: mask called tclass=%u uid=%u proc=%d file=%d
++",
++			    tclass, current_uid().val, SECCLASS_PROCESS, SECCLASS_FILE);
++
 +	if (uid_eq(current_uid(), GLOBAL_ROOT_UID) || current_uid().val < 10000)
 +		return;
 +
@@ -387,14 +453,20 @@ index 0a5e197a2c75..429068c1f4bd 100644
 +		 * boots with a built-in policy never runs the explicit
 +		 * policydb load path, so a load-time resolve would never fire.
 +		 */
-+		if (!marble_masked_type_valid && policydb) {
++		if (!marble_masked_type_valid && policydb)
 +			marble_resolve_masked_types(policydb);
-+			pr_info("marble: resolved %u masked types (tclass=file)\n",
-+				marble_masked_type_valid);
-+		}
-+		if (!marble_type_is_masked(t_type))
++		/*
++		 * Report the stock verdict for the zram writeback rule as well:
++		 * app queries never see the root-granted read edge. Excluded
++		 * when the querying side is the kernel itself (writeback path),
++		 * which must keep working.
++		 */
++		if (marble_type_is_masked(t_type) ||
++		    (marble_adb_data_file_type &&
++		     t_type == marble_adb_data_file_type))
++			mask = MARBLE_FILE_READ;
++		else
 +			return;
-+		mask = MARBLE_FILE_READ;
 +	} else {
 +		return;
 +	}
@@ -406,7 +478,7 @@ index 0a5e197a2c75..429068c1f4bd 100644
  void security_compute_av_user(struct selinux_state *state,
  			      u32 ssid,
  			      u32 tsid,
-@@ -1218,6 +1326,8 @@ void security_compute_av_user(struct selinux_state *state,
+@@ -1218,6 +1369,8 @@ void security_compute_av_user(struct selinux_state *state,
  
  	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
  				  NULL);
@@ -415,7 +487,7 @@ index 0a5e197a2c75..429068c1f4bd 100644
   out:
  	rcu_read_unlock();
  	return;
-@@ -2319,6 +2429,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
+@@ -2319,6 +2472,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
  		goto err_mapping;
  	}
  
@@ -426,7 +498,7 @@ index 0a5e197a2c75..429068c1f4bd 100644
  		/* First policy load, so no need to preserve state from old policy */
  		load_state->policy = newpolicy;
 diff --git a/security/selinux/status.c b/security/selinux/status.c
-index 4bc8f809934c..467ed8627f7b 100644
+index 4bc8f809934c..aa1ac5f7c595 100644
 --- a/security/selinux/status.c
 +++ b/security/selinux/status.c
 @@ -52,7 +52,15 @@ struct page *selinux_kernel_status_page(struct selinux_state *state)
@@ -455,3 +527,12 @@ index 4bc8f809934c..467ed8627f7b 100644
  			status->deny_unknown =
  				!security_get_allow_unknown(state);
  		}
+@@ -114,7 +122,7 @@ void selinux_status_update_policyload(struct selinux_state *state,
+ 		status->sequence++;
+ 		smp_wmb();
+ 
+-		status->policyload = seqno;
++		status->policyload = seqno ? seqno : 1;
+ 		status->deny_unknown = !security_get_allow_unknown(state);
+ 
+ 		smp_wmb();
