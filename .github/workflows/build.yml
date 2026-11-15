@@ -970,7 +970,9 @@ jobs:
             echo "当前源码不含 SUSFS（cancel_susfs 或补丁未启用），跳过。"
             exit 0
           fi
-          if grep -q 'marble_mask_av_allowed(tcontext->type' "$F"; then
+          # 幂等检查：只看 SUSFS 那一行的下一行，避免误判 0032 在原生
+          # security_compute_av_user() 里插入的同名调用。
+          if awk '/susfs_spoof_avd_allowed_rcu\(scontext->type/{getline nxt; if (nxt ~ /marble_mask_av_allowed/) found=1} END{exit !found}' "$F"; then
             echo "SUSFS 副本已注入屏蔽调用，跳过。"
             exit 0
           fi
@@ -981,8 +983,8 @@ jobs:
           # 只在 SUSFS 副本里插入：定位唯一的那行 susfs_spoof_avd_allowed_rcu
           # 调用，紧随其后写入屏蔽调用。
           sed -i '/susfs_spoof_avd_allowed_rcu(scontext->type, tcontext->type, tclass, &avd->allowed);/a\	t/* marble: answer the same masked verdict on the SUSFS path */\n	marble_mask_av_allowed(tcontext->type, tclass, &avd->allowed);' "$F"
-          if ! grep -q 'marble_mask_av_allowed(tcontext->type' "$F"; then
-            echo "::error::注入失败"
+          if ! awk '/susfs_spoof_avd_allowed_rcu\(scontext->type/{getline nxt; if (nxt ~ /marble_mask_av_allowed/) found=1} END{exit !found}' "$F"; then
+            echo "::error::注入失败：SUSFS 副本后未出现屏蔽调用"
             exit 1
           fi
           echo "已为 SUSFS compute_av 副本注入 AV 屏蔽调用"
