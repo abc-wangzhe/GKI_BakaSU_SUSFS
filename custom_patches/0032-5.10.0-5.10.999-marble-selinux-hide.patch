@@ -288,10 +288,10 @@ index 6fe9d0cea418..7f4e98c1327f 100644
  	if (length)
  		goto out;
 diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
-index 0a5e197a2c75..0b5478690b33 100644
+index 0a5e197a2c75..7c4e41186794 100644
 --- a/security/selinux/ss/services.c
 +++ b/security/selinux/ss/services.c
-@@ -1172,6 +1172,89 @@ void security_compute_av(struct selinux_state *state,
+@@ -1172,6 +1172,97 @@ void security_compute_av(struct selinux_state *state,
  	goto out;
  }
  
@@ -357,7 +357,8 @@ index 0a5e197a2c75..0b5478690b33 100644
 +	return false;
 +}
 +
-+void marble_mask_av_allowed(u32 t_type, u16 tclass, u32 *allowed)
++void marble_mask_av_allowed(struct policydb *policydb, u32 t_type, u16 tclass,
++			   u32 *allowed)
 +{
 +	u32 mask;
 +
@@ -367,6 +368,13 @@ index 0a5e197a2c75..0b5478690b33 100644
 +	if (tclass == SECCLASS_PROCESS) {
 +		mask = MARBLE_PROCESS_EXECMEM;
 +	} else if (tclass == SECCLASS_FILE) {
++		/*
++		 * Resolve the hidden type values on first use: a GKI kernel that
++		 * boots with a built-in policy never runs the explicit
++		 * policydb load path, so a load-time resolve would never fire.
++		 */
++		if (!marble_masked_type_valid && policydb)
++			marble_resolve_masked_types(policydb);
 +		if (!marble_type_is_masked(t_type))
 +			return;
 +		mask = MARBLE_FILE_READ;
@@ -381,16 +389,16 @@ index 0a5e197a2c75..0b5478690b33 100644
  void security_compute_av_user(struct selinux_state *state,
  			      u32 ssid,
  			      u32 tsid,
-@@ -1218,6 +1301,8 @@ void security_compute_av_user(struct selinux_state *state,
+@@ -1218,6 +1309,8 @@ void security_compute_av_user(struct selinux_state *state,
  
  	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
  				  NULL);
 +	/* marble: hide rooted-device-only edges from app AV queries */
-+	marble_mask_av_allowed(tcontext->type, tclass, &avd->allowed);
++	marble_mask_av_allowed(policydb, tcontext->type, tclass, &avd->allowed);
   out:
  	rcu_read_unlock();
  	return;
-@@ -2319,6 +2404,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
+@@ -2319,6 +2412,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
  		goto err_mapping;
  	}
  
