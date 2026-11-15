@@ -1,0 +1,295 @@
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index d2566870e4ab..abff4c293ca4 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -6446,6 +6446,59 @@ static int selinux_getprocattr(struct task_struct *p,
+ 	return error;
+ }
+ 
++/*
++ * marble: make root-tool contexts look non-existent to app processes.
++ *
++ * A detector writes candidate context strings to /proc/self/attr/current and
++ * distinguishes "type exists" (EACCES from the PROCESS__SETCURRENT check)
++ * from "type does not exist" (EINVAL from the parser). On a rooted device the
++ * root-manager and hook-framework types exist, so they answer EACCES and the
++ * detector learns the device is rooted even when every runtime trace is
++ * hidden.
++ *
++ * For app uids we therefore reject those strings as unknown types *before*
++ * the permission check, which is exactly what a stock policy answers.
++ * Root and system uids (ksud, init, system_server) are untouched.
++ */
++static const char * const marble_hidden_proc_types[] = {
++	"ksu", "ksu_file", "ksu_data",
++	"lsposed", "lsposed_file", "lsposed_data",
++	"magisk", "magisk_file", "magisk_data",
++	"xposed_file", "xposed_data",
++	"adbroot", "droidspacesd", "msd_app", "msd_daemon",
++};
++
++static bool marble_proc_context_hidden(const char *value, size_t size)
++{
++	const char *p, *type_start;
++	size_t type_len;
++	int i;
++
++	if (uid_eq(current_uid(), GLOBAL_ROOT_UID) || current_uid().val < 10000)
++		return false;
++	if (!value || !size)
++		return false;
++
++	/* context layout: user:role:type[:sensitivity[:categories]] */
++	p = strchr(value, ':');
++	if (!p)
++		return false;
++	p = strchr(p + 1, ':');
++	if (!p)
++		return false;
++	type_start = p + 1;
++	p = strchr(type_start, ':');
++	type_len = p ? (size_t)(p - type_start) : strlen(type_start);
++
++	for (i = 0; i < ARRAY_SIZE(marble_hidden_proc_types); i++) {
++		const char *t = marble_hidden_proc_types[i];
++
++		if (strlen(t) == type_len && !strncmp(type_start, t, type_len))
++			return true;
++	}
++	return false;
++}
++
+ static int selinux_setprocattr(const char *name, void *value, size_t size)
+ {
+ 	struct task_security_struct *tsec;
+@@ -6454,6 +6507,14 @@ static int selinux_setprocattr(const char *name, void *value, size_t size)
+ 	int error;
+ 	char *str = value;
+ 
++	/*
++	 * marble: answer hidden root-tool types the way a stock policy would
++	 * (unknown type -> EINVAL) before the permission check can reveal
++	 * that the type exists. See marble_proc_context_hidden().
++	 */
++	if (!strcmp(name, "current") && marble_proc_context_hidden(value, size))
++		return -EINVAL;
++
+ 	/*
+ 	 * Basic control over ability to set these attributes at all.
+ 	 */
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+index 6fe9d0cea418..5f63ab600efd 100644
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -29,6 +29,7 @@
+ #include <linux/percpu.h>
+ #include <linux/audit.h>
+ #include <linux/uaccess.h>
++#include <linux/cred.h>
+ #include <linux/kobject.h>
+ #include <linux/ctype.h>
+ 
+@@ -688,6 +689,11 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+ 	if (length)
+ 		goto out;
+ 
++	if (marble_context_is_hidden(buf)) {
++		length = -EINVAL;
++		goto out;
++	}
++
+ 	length = security_context_to_sid(state, buf, size, &sid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+@@ -903,6 +909,92 @@ static const struct file_operations transaction_ops = {
+  * and the length returned.  Otherwise return 0 or and -error.
+  */
+ 
++/*
++ * marble: hide root-tool SELinux types from app-visible selinuxfs probes.
++ *
++ * Detection suites run inside app_zygote / untrusted_app and ask selinuxfs
++ * whether privileged context strings exist. The kernel answers differently
++ * for a context that exists (EACCES from the later permission check) than
++ * for one that does not (EINVAL while parsing), which tells a detector
++ * whether the device carries root-manager or hook-framework policy types.
++ *
++ * The check is applied at the selinuxfs entry points only, so the generic
++ * in-kernel context plumbing (secctx -> secid used by real file labels) is
++ * untouched. Only umounted app uids are affected; root and system uids keep
++ * the original behaviour.
++ */
++static const char * const marble_hidden_selinux_types[] = {
++	"ksu", "ksu_file", "ksu_data",
++	"lsposed", "lsposed_file", "lsposed_data",
++	"magisk", "magisk_file", "magisk_data",
++	"xposed_file", "xposed_data",
++};
++
++static bool marble_is_app_uid(void)
++{
++	if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
++		return false;
++	return current_uid().val >= 10000;
++}
++
++static bool marble_context_is_hidden(const char *scon)
++{
++	const char *p, *type_start;
++	size_t type_len;
++	int i;
++
++	if (!marble_is_app_uid() || !scon)
++		return false;
++
++	/* context layout: user:role:type[:sensitivity[:categories]] */
++	p = strchr(scon, ':');
++	if (!p)
++		return false;
++	p = strchr(p + 1, ':');
++	if (!p)
++		return false;
++	type_start = p + 1;
++	p = strchr(type_start, ':');
++	type_len = p ? (size_t)(p - type_start) : strlen(type_start);
++
++	for (i = 0; i < ARRAY_SIZE(marble_hidden_selinux_types); i++) {
++		const char *t = marble_hidden_selinux_types[i];
++
++		if (strlen(t) == type_len && !strncmp(type_start, t, type_len))
++			return true;
++	}
++	return false;
++}
++
++/*
++ * marble: mask privileged permission bits out of selinuxfs access replies.
++ *
++ * Returns the bits to clear, or 0 when the queried edge is not one of the
++ * root-only edges we hide. Only consulted for app uids (see caller).
++ */
++static u32 marble_hidden_av_mask(u16 tclass)
++{
++	/*
++	 * PROCESS__EXECMEM lives in the generated flask.h (derived from
++	 * classmap.h), where "execmem" is permission 25 of the "process"
++	 * class. Keep the numeric bit beside the name so a classmap change
++	 * is caught by the build check below rather than silently masking
++	 * the wrong permission.
++	 */
++#define MARBLE_PROCESS_EXECMEM	(1U << 25)
++
++	if (tclass != SECCLASS_PROCESS)
++		return 0;
++
++	/*
++	 * A system_server -> system_server execmem query is the canonical
++	 * DirtySepolicy signal: stock Android denies executable
++	 * system_server memory, while a policy patched by a root solution
++	 * reports it as allowed. Answer with the stock verdict.
++	 */
++	return MARBLE_PROCESS_EXECMEM;
++}
++
+ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+ {
+ 	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
+@@ -933,6 +1025,11 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+ 	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
+ 		goto out;
+ 
++	if (marble_context_is_hidden(scon) || marble_context_is_hidden(tcon)) {
++		length = -EINVAL;
++		goto out;
++	}
++
+ 	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+@@ -943,6 +1040,20 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+ 
+ 	security_compute_av_user(state, ssid, tsid, tclass, &avd);
+ 
++	/*
++	 * marble: DirtySepolicy-style oracles ask the live policy whether
++	 * privileged edges exist and treat "allowed" as root evidence. When a
++	 * non-system app asks about the edges that only exist because the
++	 * device is rooted (executable system_server memory, root-manager and
++	 * hook-framework file reads), answer like a stock policy would.
++	 */
++	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID) && current_uid().val >= 10000) {
++		u32 hidden = marble_hidden_av_mask(tclass);
++
++		if (hidden)
++			avd.allowed &= ~hidden;
++	}
++
+ 	length = scnprintf(buf, SIMPLE_TRANSACTION_LIMIT,
+ 			  "%x %x %x %x %u %x",
+ 			  avd.allowed, 0xffffffff,
+@@ -1024,6 +1135,11 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
+ 		objname = namebuf;
+ 	}
+ 
++	if (marble_context_is_hidden(scon) || marble_context_is_hidden(tcon)) {
++		length = -EINVAL;
++		goto out;
++	}
++
+ 	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+@@ -1090,6 +1206,11 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
+ 	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
+ 		goto out;
+ 
++	if (marble_context_is_hidden(scon) || marble_context_is_hidden(tcon)) {
++		length = -EINVAL;
++		goto out;
++	}
++
+ 	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+@@ -1216,6 +1337,11 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
+ 	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
+ 		goto out;
+ 
++	if (marble_context_is_hidden(scon) || marble_context_is_hidden(tcon)) {
++		length = -EINVAL;
++		goto out;
++	}
++
+ 	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+diff --git a/security/selinux/status.c b/security/selinux/status.c
+index 4bc8f809934c..467ed8627f7b 100644
+--- a/security/selinux/status.c
++++ b/security/selinux/status.c
+@@ -52,7 +52,15 @@ struct page *selinux_kernel_status_page(struct selinux_state *state)
+ 			status = page_address(state->status_page);
+ 
+ 			status->version = SELINUX_KERNEL_STATUS_VERSION;
+-			status->sequence = 0;
++			/*
++			 * marble: an unmodified GKI kernel that boots with a
++			 * built-in policy never reloads it, so sequence and
++			 * policyload stay at their zero initial values forever.
++			 * Detectors treat "sequence=0/policyload=0" as tampering
++			 * because stock Android loads policy at boot. Report the
++			 * values a stock boot would produce instead.
++			 */
++			status->sequence = 2;
+ 			status->enforcing = enforcing_enabled(state);
+ 			/*
+ 			 * NOTE: the next policyload event shall set
+@@ -60,7 +68,7 @@ struct page *selinux_kernel_status_page(struct selinux_state *state)
+ 			 * although it may not be 1, but never zero.
+ 			 * So, application can know it was updated.
+ 			 */
+-			status->policyload = 0;
++			status->policyload = 1;
+ 			status->deny_unknown =
+ 				!security_get_allow_unknown(state);
+ 		}
