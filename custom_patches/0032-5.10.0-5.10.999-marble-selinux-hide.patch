@@ -332,10 +332,10 @@ index 6fe9d0cea418..b5822797ba6e 100644
  	if (length)
  		goto out;
 diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
-index 0a5e197a2c75..5e1f8cc4f513 100644
+index 0a5e197a2c75..ff762c9ccb3d 100644
 --- a/security/selinux/ss/services.c
 +++ b/security/selinux/ss/services.c
-@@ -1172,6 +1172,154 @@ void security_compute_av(struct selinux_state *state,
+@@ -1172,6 +1172,169 @@ void security_compute_av(struct selinux_state *state,
  	goto out;
  }
  
@@ -415,6 +415,21 @@ index 0a5e197a2c75..5e1f8cc4f513 100644
 +			marble_adb_data_file_type = adb->value;
 +	}
 +
++	/*
++	 * Resolve by hash lookup first: it needs no name array, which a
++	 * built-in policy may not populate. The value table walk is kept as a
++	 * fallback for kernels where the symtab hash is unavailable.
++	 */
++	for (i = 0; i < MARBLE_MASKED_TYPE_NR; i++) {
++		datum = symtab_search(&policydb->p_types,
++				      marble_masked_type_names[i]);
++		if (datum)
++			marble_masked_type_values[marble_masked_type_valid++] =
++				datum->value;
++	}
++	if (marble_masked_type_valid)
++		return;
++
 +	/* Walk the type table once instead of hashing each name: works even
 +	 * when the symtab hashing setup differs (as on a built-in policy). */
 +	for (v = 1; v <= policydb->p_types.nprim; v++) {
@@ -490,7 +505,7 @@ index 0a5e197a2c75..5e1f8cc4f513 100644
  void security_compute_av_user(struct selinux_state *state,
  			      u32 ssid,
  			      u32 tsid,
-@@ -1218,6 +1366,8 @@ void security_compute_av_user(struct selinux_state *state,
+@@ -1218,6 +1381,8 @@ void security_compute_av_user(struct selinux_state *state,
  
  	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
  				  NULL);
@@ -499,7 +514,7 @@ index 0a5e197a2c75..5e1f8cc4f513 100644
   out:
  	rcu_read_unlock();
  	return;
-@@ -2319,6 +2469,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
+@@ -2319,6 +2484,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
  		goto err_mapping;
  	}
  
@@ -510,27 +525,25 @@ index 0a5e197a2c75..5e1f8cc4f513 100644
  		/* First policy load, so no need to preserve state from old policy */
  		load_state->policy = newpolicy;
 diff --git a/security/selinux/status.c b/security/selinux/status.c
-index 4bc8f809934c..aa1ac5f7c595 100644
+index 4bc8f809934c..85d09813e0f6 100644
 --- a/security/selinux/status.c
 +++ b/security/selinux/status.c
-@@ -52,7 +52,15 @@ struct page *selinux_kernel_status_page(struct selinux_state *state)
+@@ -52,7 +52,13 @@ struct page *selinux_kernel_status_page(struct selinux_state *state)
  			status = page_address(state->status_page);
  
  			status->version = SELINUX_KERNEL_STATUS_VERSION;
 -			status->sequence = 0;
 +			/*
-+			 * marble: an unmodified GKI kernel that boots with a
-+			 * built-in policy never reloads it, so sequence and
-+			 * policyload stay at their zero initial values forever.
-+			 * Detectors treat "sequence=0/policyload=0" as tampering
-+			 * because stock Android loads policy at boot. Report the
-+			 * values a stock boot would produce instead.
++			 * marble: a GKI kernel booting with a built-in policy never
++			 * reloads it, so these counters would stay at their zero
++			 * initial values forever and detection suites read that as
++			 * tampering. Report what a stock boot produces.
 +			 */
 +			status->sequence = 2;
  			status->enforcing = enforcing_enabled(state);
  			/*
  			 * NOTE: the next policyload event shall set
-@@ -60,7 +68,7 @@ struct page *selinux_kernel_status_page(struct selinux_state *state)
+@@ -60,7 +66,7 @@ struct page *selinux_kernel_status_page(struct selinux_state *state)
  			 * although it may not be 1, but never zero.
  			 * So, application can know it was updated.
  			 */
@@ -539,11 +552,12 @@ index 4bc8f809934c..aa1ac5f7c595 100644
  			status->deny_unknown =
  				!security_get_allow_unknown(state);
  		}
-@@ -114,7 +122,7 @@ void selinux_status_update_policyload(struct selinux_state *state,
+@@ -114,7 +120,8 @@ void selinux_status_update_policyload(struct selinux_state *state,
  		status->sequence++;
  		smp_wmb();
  
 -		status->policyload = seqno;
++		/* marble: never publish a zero reload counter */
 +		status->policyload = seqno ? seqno : 1;
  		status->deny_unknown = !security_get_allow_unknown(state);
  

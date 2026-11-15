@@ -990,6 +990,37 @@ jobs:
           echo "已为 SUSFS compute_av 副本注入 AV 屏蔽调用"
           grep -n -A2 'susfs_spoof_avd_allowed_rcu(scontext->type' "$F" | head -5
 
+      # ==================== SUSFS status.policyload 钳制 ====================
+      # SUSFS 在 selinux_status_update_policyload() 里为 ksu 域单独写
+      # status->policyload = seqno，绕过了 0032 在该函数里的钳制。seqno
+      # 在内建策略下恒为 0，于是 app 读到 sequence=2/policyload=0，
+      # 检测器判为 seqno split。这里同样用行定位改写。
+      - name: 钳制 SUSFS 写入的 policyload
+        if: inputs.apply_custom_patches && inputs.cancel_susfs != true
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          set -e
+          F=security/selinux/status.c
+          if [ ! -f "$F" ]; then
+            echo "未找到 $F，跳过。"
+            exit 0
+          fi
+          if ! grep -q 'susfs_is_current_ksu_domain' "$F"; then
+            echo "当前源码不含 SUSFS status 钩子，跳过。"
+            exit 0
+          fi
+          if grep -q 'seqno ? seqno : 1' "$F"; then
+            echo "policyload 已钳制，跳过。"
+            exit 0
+          fi
+          awk '/status->policyload = seqno;/{sub(/= seqno;/, "= seqno ? seqno : 1;"); print; next} {print}' "$F" > "$F.new" && mv "$F.new" "$F"
+          if ! grep -q 'seqno ? seqno : 1' "$F"; then
+            echo "::error::policyload 钳制失败"
+            exit 1
+          fi
+          echo "已钳制 SUSFS 写入的 policyload"
+          grep -n 'policyload' "$F" | head -5
+
       - name: 克隆 Droidspaces 补丁仓库
         if: inputs.clean_build != true && inputs.droidspaces != 'off'
         run: |
