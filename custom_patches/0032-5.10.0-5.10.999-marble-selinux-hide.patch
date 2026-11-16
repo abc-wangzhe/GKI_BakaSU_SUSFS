@@ -90,7 +90,7 @@ index 98e1c8793b4e..acec99cdc39a 100644
  		if (lsm != NULL && strcmp(lsm, hp->lsm))
  			continue;
 diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
-index 6fe9d0cea418..7eaf1b8fce2e 100644
+index 6fe9d0cea418..57e2e238ce02 100644
 --- a/security/selinux/selinuxfs.c
 +++ b/security/selinux/selinuxfs.c
 @@ -29,6 +29,7 @@
@@ -101,7 +101,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  #include <linux/kobject.h>
  #include <linux/ctype.h>
  
-@@ -80,6 +81,21 @@ struct selinux_fs_info {
+@@ -80,6 +81,27 @@ struct selinux_fs_info {
  	struct super_block *sb;
  };
  
@@ -113,6 +113,12 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
 + * because sel_open_policy()/sel_read_policy() reference it long before the
 + * access-entry helpers are declared.
 + */
++/*
++ * file class permission order (classmap.h COMMON_FILE_SOCK_PERMS):
++ * ioctl(0), read(1), write(2), ... — "read" is bit 1.
++ */
++#define MARBLE_FILE_READ_BIT	(1U << 1)
++
 +static bool marble_is_app_uid(void)
 +{
 +	if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
@@ -123,7 +129,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  static int selinux_fs_info_create(struct super_block *sb)
  {
  	struct selinux_fs_info *fsi;
-@@ -400,6 +416,17 @@ static int sel_open_policy(struct inode *inode, struct file *filp)
+@@ -400,6 +422,17 @@ static int sel_open_policy(struct inode *inode, struct file *filp)
  
  	mutex_lock(&fsi->state->policy_mutex);
  
@@ -141,7 +147,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  	rc = avc_has_perm(&selinux_state,
  			  current_sid(), SECINITSID_SECURITY,
  			  SECCLASS_SECURITY, SECURITY__READ_POLICY, NULL);
-@@ -462,6 +489,10 @@ static ssize_t sel_read_policy(struct file *filp, char __user *buf,
+@@ -462,6 +495,10 @@ static ssize_t sel_read_policy(struct file *filp, char __user *buf,
  	struct policy_load_memory *plm = filp->private_data;
  	int ret;
  
@@ -152,7 +158,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  	ret = avc_has_perm(&selinux_state,
  			   current_sid(), SECINITSID_SECURITY,
  			  SECCLASS_SECURITY, SECURITY__READ_POLICY, NULL);
-@@ -674,6 +705,56 @@ static const struct file_operations sel_load_ops = {
+@@ -674,6 +711,56 @@ static const struct file_operations sel_load_ops = {
  	.llseek		= generic_file_llseek,
  };
  
@@ -209,7 +215,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
  {
  	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
-@@ -682,6 +763,16 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+@@ -682,6 +769,16 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
  	u32 sid, len;
  	ssize_t length;
  
@@ -226,7 +232,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  	length = avc_has_perm(&selinux_state,
  			      current_sid(), SECINITSID_SECURITY,
  			      SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
-@@ -903,6 +994,35 @@ static const struct file_operations transaction_ops = {
+@@ -903,6 +1000,35 @@ static const struct file_operations transaction_ops = {
   * and the length returned.  Otherwise return 0 or and -error.
   */
  
@@ -262,7 +268,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  {
  	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
-@@ -933,6 +1053,11 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+@@ -933,6 +1059,11 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -274,7 +280,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -943,6 +1068,36 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+@@ -943,6 +1074,36 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  
  	security_compute_av_user(state, ssid, tsid, tclass, &avd);
  
@@ -292,7 +298,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
 +	 */
 +	if (marble_is_app_uid() && tclass == SECCLASS_FILE &&
 +	    strstr(scon, ":kernel:") && strstr(tcon, ":adb_data_file"))
-+		avd.allowed &= ~1U;	/* file class: read */
++		avd.allowed &= ~MARBLE_FILE_READ_BIT;	/* file class: read = bit 1 */
 +
 +	/*
 +	 * marble: DirtySepolicy-style oracles ask the live policy whether
@@ -311,7 +317,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  	length = scnprintf(buf, SIMPLE_TRANSACTION_LIMIT,
  			  "%x %x %x %x %u %x",
  			  avd.allowed, 0xffffffff,
-@@ -1024,6 +1179,11 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
+@@ -1024,6 +1185,11 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
  		objname = namebuf;
  	}
  
@@ -323,7 +329,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -1090,6 +1250,11 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
+@@ -1090,6 +1256,11 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -335,7 +341,7 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -1216,6 +1381,11 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
+@@ -1216,6 +1387,11 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -348,10 +354,10 @@ index 6fe9d0cea418..7eaf1b8fce2e 100644
  	if (length)
  		goto out;
 diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
-index 0a5e197a2c75..ff762c9ccb3d 100644
+index 0a5e197a2c75..c509aef65fd6 100644
 --- a/security/selinux/ss/services.c
 +++ b/security/selinux/ss/services.c
-@@ -1172,6 +1172,169 @@ void security_compute_av(struct selinux_state *state,
+@@ -1172,6 +1172,174 @@ void security_compute_av(struct selinux_state *state,
  	goto out;
  }
  
@@ -385,7 +391,12 @@ index 0a5e197a2c75..ff762c9ccb3d 100644
 + * whenever this patch is rebased (see MARBLE_CHECK_* below).
 + */
 +#define MARBLE_PROCESS_EXECMEM	(1U << 25)	/* process class: execmem */
-+#define MARBLE_FILE_READ	(1U << 0)	/* file class: read */
++/*
++ * file class permission order (classmap.h COMMON_FILE_SOCK_PERMS):
++ *   ioctl(0), read(1), write(2), create(3), getattr(4), ...
++ * "read" is bit 1 — NOT bit 0.
++ */
++#define MARBLE_FILE_READ	(1U << 1)	/* file class: read */
 +
 +static const char * const marble_masked_type_names[] = {
 +	"ksu", "ksu_file", "ksu_data",
@@ -521,7 +532,7 @@ index 0a5e197a2c75..ff762c9ccb3d 100644
  void security_compute_av_user(struct selinux_state *state,
  			      u32 ssid,
  			      u32 tsid,
-@@ -1218,6 +1381,8 @@ void security_compute_av_user(struct selinux_state *state,
+@@ -1218,6 +1386,8 @@ void security_compute_av_user(struct selinux_state *state,
  
  	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
  				  NULL);
@@ -530,7 +541,7 @@ index 0a5e197a2c75..ff762c9ccb3d 100644
   out:
  	rcu_read_unlock();
  	return;
-@@ -2319,6 +2484,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
+@@ -2319,6 +2489,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
  		goto err_mapping;
  	}
  
