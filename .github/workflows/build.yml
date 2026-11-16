@@ -990,12 +990,22 @@ jobs:
           echo "已为 SUSFS compute_av 副本注入 AV 屏蔽调用"
           grep -n -A2 'susfs_spoof_avd_allowed_rcu(scontext->type' "$F" | head -5
 
-      # ==================== SUSFS status.policyload 钳制 ====================
-      # SUSFS 在 selinux_status_update_policyload() 里为 ksu 域单独写
-      # status->policyload = seqno，绕过了 0032 在该函数里的钳制。seqno
-      # 在内建策略下恒为 0，于是 app 读到 sequence=2/policyload=0，
-      # 检测器判为 seqno split。这里同样用行定位改写。
-      - name: 钳制 SUSFS 写入的 policyload
+      # ==================== 校验 status 页保持 stock ====================
+      # 检测器（Duck / 春秋 / LSPosed DirtySepolicy，三者同源）对开机后
+      # status 页的判据按内核版本分支：
+      #
+      #   uname release < 6.10  ->  sequence == 0 && policyload == 0
+      #   uname release >= 6.10 ->  sequence == 4 && policyload == 1
+      #
+      # 5.10 内核走第一支。status 页是懒分配的：init 加载策略发生在第一次
+      # open/mmap 之前，那时 state->status_page 还是 NULL，更新函数里的
+      # if (state->status_page) 守卫会直接跳过，所以页面分配出来就是 stock
+      # 的零值，此后内核不再重载内建策略，零值就是稳态。
+      #
+      # 因此这里什么都不改，只断言源码里没有把这两个初值写花。曾经把初值
+      # 改成 sequence=2 / policyload=1，两端都不匹配，被报成
+      # unexpected sequence/policyload —— 不要重犯。
+      - name: 校验 status 页初值保持 stock
         if: inputs.apply_custom_patches && inputs.cancel_susfs != true
         working-directory: ${{ env.KERNEL_ROOT }}/common
         run: |
@@ -1005,24 +1015,19 @@ jobs:
             echo "未找到 $F，跳过。"
             exit 0
           fi
-          if ! grep -q 'susfs_is_current_ksu_domain' "$F"; then
-            echo "当前源码不含 SUSFS status 钩子，跳过。"
-            exit 0
-          fi
-          # 0032 已经改过 update_policyload 的普通分支，这里要处理的是
-          # SUSFS 在函数开头插入的 ksu 域分支，它仍是原样的
-          # "status->policyload = seqno;"。因此按该精确形态判断幂等。
-          if ! grep -q 'status->policyload = seqno;' "$F"; then
-            echo "SUSFS 分支的 policyload 已钳制或无该分支，跳过。"
-            exit 0
-          fi
-          awk '/status->policyload = seqno;/{sub(/= seqno;/, "= seqno ? seqno : 1;"); print; next} {print}' "$F" > "$F.new" && mv "$F.new" "$F"
-          if grep -q 'status->policyload = seqno;' "$F"; then
-            echo "::error::policyload 钳制失败：仍存在未钳制的赋值"
+          # 初值必须是 0（alloc_page 已 __GFP_ZERO，源码里通常直接赋 0）。
+          if grep -qE 'status->sequence = [1-9]' "$F"; then
+            echo "::error::status->sequence 初值被改成了非零值，会触发 unexpected sequence/policyload"
+            grep -n 'status->sequence = ' "$F"
             exit 1
           fi
-          echo "已钳制 SUSFS 写入的 policyload"
-          grep -n 'policyload' "$F" | head -5
+          if grep -qE 'status->policyload = [1-9]' "$F"; then
+            echo "::error::status->policyload 初值被改成了非零值，会触发 unexpected sequence/policyload"
+            grep -n 'status->policyload = ' "$F"
+            exit 1
+          fi
+          echo "status 页初值保持 stock（0/0），符合 < 6.10 内核的检测基线"
+          grep -n 'status->sequence = \|status->policyload = ' "$F" || true
 
       - name: 克隆 Droidspaces 补丁仓库
         if: inputs.clean_build != true && inputs.droidspaces != 'off'
