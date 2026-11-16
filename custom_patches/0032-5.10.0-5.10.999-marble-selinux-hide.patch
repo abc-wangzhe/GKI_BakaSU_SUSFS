@@ -90,7 +90,7 @@ index 98e1c8793b4e..acec99cdc39a 100644
  		if (lsm != NULL && strcmp(lsm, hp->lsm))
  			continue;
 diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
-index 6fe9d0cea418..57e2e238ce02 100644
+index 6fe9d0cea418..97eb5b788be8 100644
 --- a/security/selinux/selinuxfs.c
 +++ b/security/selinux/selinuxfs.c
 @@ -29,6 +29,7 @@
@@ -296,8 +296,8 @@ index 6fe9d0cea418..57e2e238ce02 100644
 +	 * caller-supplied context strings instead: they are exactly what the
 +	 * detector asked about.
 +	 */
-+	if (marble_is_app_uid() && tclass == SECCLASS_FILE &&
-+	    strstr(scon, ":kernel:") && strstr(tcon, ":adb_data_file"))
++	if (tclass == SECCLASS_FILE &&
++	    strstr(scon, "kernel") && strstr(tcon, "adb_data_file"))
 +		avd.allowed &= ~MARBLE_FILE_READ_BIT;	/* file class: read = bit 1 */
 +
 +	/*
