@@ -101,7 +101,16 @@ index 6fe9d0cea418..97eb5b788be8 100644
  #include <linux/kobject.h>
  #include <linux/ctype.h>
  
-@@ -80,6 +81,27 @@ struct selinux_fs_info {
+@@ -39,7 +40,8 @@
+ #include "flask.h"
+ #include "avc.h"
+ #include "avc_ss.h"
+ #include "security.h"
++#include "ss/services.h"
+ #include "objsec.h"
+ #include "conditional.h"
+ 
+@@ -80,6 +82,27 @@ struct selinux_fs_info {
  	struct super_block *sb;
  };
  
@@ -129,7 +138,7 @@ index 6fe9d0cea418..97eb5b788be8 100644
  static int selinux_fs_info_create(struct super_block *sb)
  {
  	struct selinux_fs_info *fsi;
-@@ -400,6 +422,17 @@ static int sel_open_policy(struct inode *inode, struct file *filp)
+@@ -400,6 +423,17 @@ static int sel_open_policy(struct inode *inode, struct file *filp)
  
  	mutex_lock(&fsi->state->policy_mutex);
  
@@ -147,7 +156,7 @@ index 6fe9d0cea418..97eb5b788be8 100644
  	rc = avc_has_perm(&selinux_state,
  			  current_sid(), SECINITSID_SECURITY,
  			  SECCLASS_SECURITY, SECURITY__READ_POLICY, NULL);
-@@ -462,6 +495,10 @@ static ssize_t sel_read_policy(struct file *filp, char __user *buf,
+@@ -462,6 +496,10 @@ static ssize_t sel_read_policy(struct file *filp, char __user *buf,
  	struct policy_load_memory *plm = filp->private_data;
  	int ret;
  
@@ -158,7 +167,7 @@ index 6fe9d0cea418..97eb5b788be8 100644
  	ret = avc_has_perm(&selinux_state,
  			   current_sid(), SECINITSID_SECURITY,
  			  SECCLASS_SECURITY, SECURITY__READ_POLICY, NULL);
-@@ -674,6 +711,56 @@ static const struct file_operations sel_load_ops = {
+@@ -674,6 +712,56 @@ static const struct file_operations sel_load_ops = {
  	.llseek		= generic_file_llseek,
  };
  
@@ -215,7 +224,7 @@ index 6fe9d0cea418..97eb5b788be8 100644
  static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
  {
  	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
-@@ -682,6 +769,16 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+@@ -682,6 +770,16 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
  	u32 sid, len;
  	ssize_t length;
  
@@ -232,7 +241,7 @@ index 6fe9d0cea418..97eb5b788be8 100644
  	length = avc_has_perm(&selinux_state,
  			      current_sid(), SECINITSID_SECURITY,
  			      SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
-@@ -903,6 +1000,35 @@ static const struct file_operations transaction_ops = {
+@@ -903,6 +1001,81 @@ static const struct file_operations transaction_ops = {
   * and the length returned.  Otherwise return 0 or and -error.
   */
  
@@ -242,33 +251,79 @@ index 6fe9d0cea418..97eb5b788be8 100644
 + * Returns the bits to clear, or 0 when the queried edge is not one of the
 + * root-only edges we hide. Only consulted for app uids (see caller).
 + */
-+static u32 marble_hidden_av_mask(u16 tclass)
++/*
++ * marble: identify a class by name in the loaded policy.
++ *
++ * SECCLASS_* constants index classmap.h, which lists process2 third. A
++ * policy that binds process2 last shifts everything after it; this
++ * device reports process2 = 93, so classmap.h's file (7) addresses "dir"
++ * at runtime and the policy's "file" is 6. Never key a mask on the
++ * compile-time constant — resolve the name through the policy instead.
++ *
++ * security.h forward-declares struct selinux_policy only, so this needs
++ * ss/services.h for the class name table. rcu_dereference comes from
++ * <linux/rcupdate.h>, already pulled in by security.h.
++ */
++static bool marble_class_is(struct selinux_state *state, u16 tclass,
++			    const char *name)
 +{
-+	/*
-+	 * PROCESS__EXECMEM lives in the generated flask.h (derived from
-+	 * classmap.h), where "execmem" is permission 25 of the "process"
-+	 * class. Keep the numeric bit beside the name so a classmap change
-+	 * is caught by the build check below rather than silently masking
-+	 * the wrong permission.
-+	 */
-+#define MARBLE_PROCESS_EXECMEM	(1U << 25)
++	struct selinux_policy *policy;
++	const char *tclass_name = NULL;
++	bool found;
 +
-+	if (tclass != SECCLASS_PROCESS)
-+		return 0;
++	if (!state || !tclass)
++		return false;
 +
++	rcu_read_lock();
++	policy = rcu_dereference(state->policy);
++	if (policy)
++		tclass_name = sym_name(&policy->policydb, SYM_CLASSES,
++				       tclass - 1);
++	found = tclass_name && !strcmp(tclass_name, name);
++	rcu_read_unlock();
++
++	return found;
++}
++
++/*
++ * Permission bits that root tooling turns on and that DirtySepolicy-style
++ * oracles look for. The class is resolved by name above, so these only
++ * need to match the permission order inside those classes.
++ */
++#define MARBLE_PROCESS_EXECMEM	(1U << 25)	/* process: execmem */
++#define MARBLE_FILE_EXECUTE	(1U << 14)	/* file: execute */
++
++/*
++ * Returns the permissions to clear for @tclass, or 0 when this class has
++ * no root-only edge to hide. Only consulted for app uids (see caller).
++ */
++static u32 marble_hidden_av_mask(struct selinux_state *state, u16 tclass)
++{
 +	/*
 +	 * A system_server -> system_server execmem query is the canonical
 +	 * DirtySepolicy signal: stock Android denies executable
 +	 * system_server memory, while a policy patched by a root solution
 +	 * reports it as allowed. Answer with the stock verdict.
 +	 */
-+	return MARBLE_PROCESS_EXECMEM;
++	if (marble_class_is(state, tclass, "process"))
++		return MARBLE_PROCESS_EXECMEM;
++
++	/*
++	 * DirtySepolicy also asks whether these file edges are allowed. They
++	 * only exist because this device is rooted (LSPosed's sepolicy.rule
++	 * grants system_server execute on apk_data_file), so report the
++	 * stock verdict.
++	 */
++	if (marble_class_is(state, tclass, "file"))
++		return MARBLE_FILE_EXECUTE;
++
++	return 0;
 +}
 +
  static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  {
  	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
-@@ -933,6 +1059,11 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+@@ -933,6 +1106,11 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -280,23 +335,22 @@ index 6fe9d0cea418..97eb5b788be8 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -943,6 +1074,36 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+@@ -943,6 +1121,35 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  
  	security_compute_av_user(state, ssid, tsid, tclass, &avd);
  
 +	/*
-+	 * marble: mask the root-only edge by string, not by resolving policy
-+	 * type values.
++	 * marble: mask the root-only read edge by caller-supplied context
++	 * strings, not by resolving policy type values.
 +	 *
-+	 * The only rule an app can still observe as "allowed but stock would
-+	 * deny" here is the loop driver reading the zram writeback file under
++	 * The edge is the loop driver reading the zram writeback file under
 +	 * /data/adb, granted by a sepolicy patch added with the performance
 +	 * tuning scripts. Resolving "adb_data_file" through the policy symtab
 +	 * turned out to be unreliable on a built-in GKI policy, so match the
-+	 * caller-supplied context strings instead: they are exactly what the
-+	 * detector asked about.
++	 * strings the detector asked about. The class check goes through the
++	 * policy name table, never SECCLASS_FILE (see marble_class_is).
 +	 */
-+	if (tclass == SECCLASS_FILE &&
++	if (marble_class_is(state, tclass, "file") &&
 +	    strstr(scon, "kernel") && strstr(tcon, "adb_data_file"))
 +		avd.allowed &= ~MARBLE_FILE_READ_BIT;	/* file class: read = bit 1 */
 +
@@ -308,7 +362,7 @@ index 6fe9d0cea418..97eb5b788be8 100644
 +	 * hook-framework file reads), answer like a stock policy would.
 +	 */
 +	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID) && current_uid().val >= 10000) {
-+		u32 hidden = marble_hidden_av_mask(tclass);
++		u32 hidden = marble_hidden_av_mask(state, tclass);
 +
 +		if (hidden)
 +			avd.allowed &= ~hidden;
@@ -317,7 +371,7 @@ index 6fe9d0cea418..97eb5b788be8 100644
  	length = scnprintf(buf, SIMPLE_TRANSACTION_LIMIT,
  			  "%x %x %x %x %u %x",
  			  avd.allowed, 0xffffffff,
-@@ -1024,6 +1185,11 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
+@@ -1024,6 +1231,11 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
  		objname = namebuf;
  	}
  
@@ -329,7 +383,7 @@ index 6fe9d0cea418..97eb5b788be8 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -1090,6 +1256,11 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
+@@ -1090,6 +1302,11 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -341,7 +395,7 @@ index 6fe9d0cea418..97eb5b788be8 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -1216,6 +1387,11 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
+@@ -1216,6 +1433,11 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -357,7 +411,7 @@ diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
 index 0a5e197a2c75..c509aef65fd6 100644
 --- a/security/selinux/ss/services.c
 +++ b/security/selinux/ss/services.c
-@@ -1172,6 +1172,224 @@ void security_compute_av(struct selinux_state *state,
+@@ -1172,6 +1172,252 @@ void security_compute_av(struct selinux_state *state,
  	goto out;
  }
  
@@ -526,6 +580,33 @@ index 0a5e197a2c75..c509aef65fd6 100644
 +	return false;
 +}
 +
++/*
++ * marble: identify a class by its name in the loaded policy.
++ *
++ * Never compare tclass against the compile-time SECCLASS_* constants.
++ * Those are indices into classmap.h, which lists process2 right after
++ * process. A policy that binds process2 last shifts every class after it
++ * — Android does exactly that: this device reports process2 = 93 while
++ * classmap.h puts it at 3, so SECCLASS_FILE (7 in classmap.h) addresses
++ * "dir" at runtime while the policy's own "file" is 6. A mask keyed on
++ * SECCLASS_FILE therefore clears a bit of the wrong class and the real
++ * edge stays allowed.
++ *
++ * The policy's SYM_CLASSES table is the only authoritative mapping for
++ * the tclass value this function receives.
++ */
++static bool marble_class_is(struct policydb *policydb, u16 tclass,
++			    const char *name)
++{
++	const char *tclass_name;
++
++	if (!policydb || !tclass)
++		return false;
++
++	tclass_name = sym_name(policydb, SYM_CLASSES, tclass - 1);
++	return tclass_name && !strcmp(tclass_name, name);
++}
++
 +void marble_mask_av_allowed(struct policydb *policydb, u32 s_type, u32 t_type,
 +			   u16 tclass, u32 *allowed)
 +{
@@ -535,16 +616,17 @@ index 0a5e197a2c75..c509aef65fd6 100644
 +	if (uid_eq(current_uid(), GLOBAL_ROOT_UID) || current_uid().val < 10000)
 +		return;
 +
-+	if (tclass == SECCLASS_PROCESS) {
++	/*
++	 * Resolve the hidden type values on first use: a GKI kernel that
++	 * boots with a built-in policy never runs the explicit policydb load
++	 * path, so a load-time resolve would never fire.
++	 */
++	if (!marble_masked_type_valid && policydb)
++		marble_resolve_masked_types(policydb);
++
++	if (marble_class_is(policydb, tclass, "process")) {
 +		mask = MARBLE_PROCESS_EXECMEM;
-+	} else if (tclass == SECCLASS_FILE) {
-+		/*
-+		 * Resolve the hidden type values on first use: a GKI kernel that
-+		 * boots with a built-in policy never runs the explicit
-+		 * policydb load path, so a load-time resolve would never fire.
-+		 */
-+		if (!marble_masked_type_valid && policydb)
-+			marble_resolve_masked_types(policydb);
++	} else if (marble_class_is(policydb, tclass, "file")) {
 +		/*
 +		 * LSPosed grants this pair through its magisk-module
 +		 * sepolicy.rule; stock system_server.te has no execute on
@@ -582,7 +664,7 @@ index 0a5e197a2c75..c509aef65fd6 100644
  void security_compute_av_user(struct selinux_state *state,
  			      u32 ssid,
  			      u32 tsid,
-@@ -1218,6 +1436,9 @@ void security_compute_av_user(struct selinux_state *state,
+@@ -1218,6 +1464,9 @@ void security_compute_av_user(struct selinux_state *state,
  
  	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
  				  NULL);
@@ -592,7 +674,7 @@ index 0a5e197a2c75..c509aef65fd6 100644
   out:
  	rcu_read_unlock();
  	return;
-@@ -2319,6 +2540,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
+@@ -2319,6 +2568,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
  		goto err_mapping;
  	}
  
