@@ -990,6 +990,67 @@ jobs:
           echo "已为 SUSFS compute_av 副本注入 AV 屏蔽调用"
           grep -n -A2 'susfs_spoof_avd_allowed_rcu(scontext->type' "$F" | head -5
 
+      # ==================== SUSFS 原生应答器注入隐藏类型守卫 ====================
+      # BakaSU 的 selinux_hide 开关（SUSFS 集成分支）在 running=true 时把
+      # uid>=10000 的 selinuxfs 写请求改投 susfs_sel_write_context /
+      # susfs_sel_write_access —— 备份策略作答，绕过 0032 在 stock
+      # sel_write_* 里插的 marble_context_is_hidden EINVAL 守卫。
+      # 备份策略里含有 root 管理器注入的类型，于是 context 节点对
+      # u:r:ksu:s0 等回答"存在"，检测器（春秋 SELinux上下文项 / Duck
+      # context validity oracle / DirtySepolicy original checks 的
+      # contextExists）全部命中。
+      #
+      # 这里把同一守卫注入两个原生应答器：隐藏类型在原生路径上同样拿到
+      # stock 语义的 EINVAL，其余查询继续走备份策略（通用式隐藏保留）。
+      # 锚点取 SUSFS 函数体内唯一形态的行，不会误伤 stock 同名解析行。
+      - name: 为 SUSFS selinuxfs 应答器注入隐藏类型守卫
+        if: inputs.apply_custom_patches && inputs.cancel_susfs != true
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          set -e
+          F=security/selinux/selinuxfs.c
+          if [ ! -f "$F" ]; then
+            echo "未找到 $F，跳过。"
+            exit 0
+          fi
+          if ! grep -q 'susfs_sel_write_context' "$F"; then
+            echo "当前源码不含 SUSFS selinuxfs 应答器，跳过。"
+            exit 0
+          fi
+          if grep -q 'marble: hidden types stay stock-invalid on the native path' "$F"; then
+            echo "原生应答器已注入守卫，跳过。"
+            exit 0
+          fi
+          if ! grep -q '^static bool marble_context_is_hidden' "$F"; then
+            echo "::error::未找到 marble_context_is_hidden，0032 补丁未生效"
+            exit 1
+          fi
+          # 守卫 1：context 节点 —— 插在 susfs_security_context_to_sid 调用前。
+          # 该调用的 (state, buf, size, &sid, GFP_KERNEL) 形态在文件中唯一。
+          CNT=$(grep -c 'length = susfs_security_context_to_sid(state, buf, size, &sid, GFP_KERNEL);' "$F" || true)
+          if [ "$CNT" != "1" ]; then
+            echo "::error::context 锚点不唯一（$CNT 处），中止以免误注入"
+            exit 1
+          fi
+          awk '/length = susfs_security_context_to_sid\(state, buf, size, &sid, GFP_KERNEL\);/{printf "\t/* marble: hidden types stay stock-invalid on the native path */\n\tif (marble_context_is_hidden(buf)) {\n\t\tlength = -EINVAL;\n\t\tgoto out;\n\t}\n"} {print}' "$F" > "$F.new" && mv "$F.new" "$F"
+          # 守卫 2：access 节点 —— 插在 scon 的 sid 解析前。
+          # susfs_security_context_str_to_sid(state, scon, &ssid, ...) 形态唯一。
+          CNT=$(grep -c 'length = susfs_security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);' "$F" || true)
+          if [ "$CNT" != "1" ]; then
+            echo "::error::access 锚点不唯一（$CNT 处），中止以免误注入"
+            exit 1
+          fi
+          awk '/length = susfs_security_context_str_to_sid\(state, scon, &ssid, GFP_KERNEL\);/{printf "\t/* marble: hidden types stay stock-invalid on the native path */\n\tif (marble_context_is_hidden(scon) || marble_context_is_hidden(tcon)) {\n\t\tlength = -EINVAL;\n\t\tgoto out;\n\t}\n"} {print}' "$F" > "$F.new" && mv "$F.new" "$F"
+          # 验证两处守卫都落位。
+          GUARDS=$(grep -c 'marble: hidden types stay stock-invalid on the native path' "$F")
+          if [ "$GUARDS" != "2" ]; then
+            echo "::error::注入数量异常（$GUARDS/2），检查锚点"
+            exit 1
+          fi
+          echo "已为 SUSFS 原生应答器注入隐藏类型守卫（context + access）"
+          grep -n -B1 -A4 'marble: hidden types stay stock-invalid' "$F" | head -14
+
+
       # ==================== 校验 status 页保持 stock ====================
       # 检测器（Duck / 春秋 / LSPosed DirtySepolicy，三者同源）对开机后
       # status 页的判据按内核版本分支：
