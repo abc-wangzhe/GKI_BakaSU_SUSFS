@@ -392,11 +392,22 @@ index 0a5e197a2c75..c509aef65fd6 100644
 + */
 +#define MARBLE_PROCESS_EXECMEM	(1U << 25)	/* process class: execmem */
 +/*
-+ * file class permission order (classmap.h COMMON_FILE_SOCK_PERMS):
-+ *   ioctl(0), read(1), write(2), create(3), getattr(4), ...
-+ * "read" is bit 1 — NOT bit 0.
++ * file class permission order (classmap.h):
++ *
++ *   COMMON_FILE_SOCK_PERMS (11 entries, bits 0..10):
++ *     ioctl(0) read(1) write(2) create(3) getattr(4) setattr(5) lock(6)
++ *     relabelfrom(7) relabelto(8) append(9) map(10)
++ *   COMMON_FILE_PERMS (25 entries) appends:
++ *     unlink(11) link(12) rename(13) execute(14) quotaon(15) mounton(16)
++ *     audit_access(17) open(18) execmod(19) watch(20) watch_mount(21)
++ *     watch_sb(22) watch_with_perm(23) watch_reads(24)
++ *   "file" class then adds: execute_no_trans(25) entrypoint(26)
++ *
++ * So "read" is bit 1 (not 0) and "execute" is bit 14 (not 13).
++ * Re-derive these whenever this patch is rebased onto a newer classmap.h.
 + */
 +#define MARBLE_FILE_READ	(1U << 1)	/* file class: read */
++#define MARBLE_FILE_EXECUTE	(1U << 14)	/* file class: execute */
 +
 +static const char * const marble_masked_type_names[] = {
 +	"ksu", "ksu_file", "ksu_data",
@@ -404,6 +415,23 @@ index 0a5e197a2c75..c509aef65fd6 100644
 +	"magisk", "magisk_file", "magisk_data",
 +	"xposed_file", "xposed_data",
 +};
++
++/*
++ * marble: LSPosed's magisk-module sepolicy.rule carries
++ *
++ *     allow system_server apk_data_file file execute
++ *
++ * AOSP's system_server.te grants apk_data_file only create_file_perms
++ * (which has no execute) plus a few ioctl whitelists, so stock never
++ * carries this edge. Duck Detector's DirtySepolicy compatibility check
++ * tests exactly this pair and reports "found LSPosed" when it resolves
++ * to allowed.
++ *
++ * Both sides are resolved by name once per policy: the source domain and
++ * the target object type.
++ */
++static u32 marble_system_server_type;
++static u32 marble_apk_data_file_type;
 +
 +/*
 + * marble: the one allow rule that only exists because this device is rooted
@@ -431,15 +459,23 @@ index 0a5e197a2c75..c509aef65fd6 100644
 +
 +	marble_masked_type_valid = 0;
 +	marble_adb_data_file_type = 0;
++	marble_system_server_type = 0;
++	marble_apk_data_file_type = 0;
 +	if (!policydb || !policydb->type_val_to_struct)
 +		return;
 +
 +	{
-+		struct type_datum *adb = symtab_search(&policydb->p_types,
-+						       "adb_data_file");
++		struct type_datum *d;
 +
-+		if (adb)
-+			marble_adb_data_file_type = adb->value;
++		d = symtab_search(&policydb->p_types, "adb_data_file");
++		if (d)
++			marble_adb_data_file_type = d->value;
++		d = symtab_search(&policydb->p_types, "system_server");
++		if (d)
++			marble_system_server_type = d->value;
++		d = symtab_search(&policydb->p_types, "apk_data_file");
++		if (d)
++			marble_apk_data_file_type = d->value;
 +	}
 +
 +	/*
@@ -490,8 +526,8 @@ index 0a5e197a2c75..c509aef65fd6 100644
 +	return false;
 +}
 +
-+void marble_mask_av_allowed(struct policydb *policydb, u32 t_type, u16 tclass,
-+			   u32 *allowed)
++void marble_mask_av_allowed(struct policydb *policydb, u32 s_type, u32 t_type,
++			   u16 tclass, u32 *allowed)
 +{
 +	u32 mask;
 +
@@ -510,6 +546,19 @@ index 0a5e197a2c75..c509aef65fd6 100644
 +		if (!marble_masked_type_valid && policydb)
 +			marble_resolve_masked_types(policydb);
 +		/*
++		 * LSPosed grants this pair through its magisk-module
++		 * sepolicy.rule; stock system_server.te has no execute on
++		 * apk_data_file. Report the stock verdict so the viability of
++		 * the rule stops being an observable LSPosed fingerprint.
++		 */
++		if (marble_system_server_type &&
++		    s_type == marble_system_server_type &&
++		    marble_apk_data_file_type &&
++		    t_type == marble_apk_data_file_type) {
++			mask = MARBLE_FILE_EXECUTE;
++			goto mask_out;
++		}
++		/*
 +		 * Report the stock verdict for the zram writeback rule as well:
 +		 * app queries never see the root-granted read edge. Excluded
 +		 * when the querying side is the kernel itself (writeback path),
@@ -525,6 +574,7 @@ index 0a5e197a2c75..c509aef65fd6 100644
 +		return;
 +	}
 +
++mask_out:
 +	*allowed &= ~mask;
 +}
 +#endif /* CONFIG_SECURITY_SELINUX */
@@ -537,7 +587,8 @@ index 0a5e197a2c75..c509aef65fd6 100644
  	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
  				  NULL);
 +	/* marble: hide rooted-device-only edges from app AV queries */
-+	marble_mask_av_allowed(policydb, tcontext->type, tclass, &avd->allowed);
++	marble_mask_av_allowed(policydb, scontext->type, tcontext->type, tclass,
++			       &avd->allowed);
   out:
  	rcu_read_unlock();
  	return;
