@@ -357,7 +357,7 @@ diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
 index 0a5e197a2c75..c509aef65fd6 100644
 --- a/security/selinux/ss/services.c
 +++ b/security/selinux/ss/services.c
-@@ -1172,6 +1172,174 @@ void security_compute_av(struct selinux_state *state,
+@@ -1172,6 +1172,224 @@ void security_compute_av(struct selinux_state *state,
  	goto out;
  }
  
@@ -582,7 +582,7 @@ index 0a5e197a2c75..c509aef65fd6 100644
  void security_compute_av_user(struct selinux_state *state,
  			      u32 ssid,
  			      u32 tsid,
-@@ -1218,6 +1386,8 @@ void security_compute_av_user(struct selinux_state *state,
+@@ -1218,6 +1436,9 @@ void security_compute_av_user(struct selinux_state *state,
  
  	context_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
  				  NULL);
@@ -592,7 +592,7 @@ index 0a5e197a2c75..c509aef65fd6 100644
   out:
  	rcu_read_unlock();
  	return;
-@@ -2319,6 +2489,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
+@@ -2319,6 +2540,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
  		goto err_mapping;
  	}
  
