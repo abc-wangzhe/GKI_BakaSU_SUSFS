@@ -90,7 +90,7 @@ index 98e1c8793b4e..acec99cdc39a 100644
  		if (lsm != NULL && strcmp(lsm, hp->lsm))
  			continue;
 diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
-index 6fe9d0cea418..b5822797ba6e 100644
+index 6fe9d0cea418..7eaf1b8fce2e 100644
 --- a/security/selinux/selinuxfs.c
 +++ b/security/selinux/selinuxfs.c
 @@ -29,6 +29,7 @@
@@ -274,10 +274,26 @@ index 6fe9d0cea418..b5822797ba6e 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -943,6 +1068,20 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+@@ -943,6 +1068,36 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  
  	security_compute_av_user(state, ssid, tsid, tclass, &avd);
  
++	/*
++	 * marble: mask the root-only edge by string, not by resolving policy
++	 * type values.
++	 *
++	 * The only rule an app can still observe as "allowed but stock would
++	 * deny" here is the loop driver reading the zram writeback file under
++	 * /data/adb, granted by a sepolicy patch added with the performance
++	 * tuning scripts. Resolving "adb_data_file" through the policy symtab
++	 * turned out to be unreliable on a built-in GKI policy, so match the
++	 * caller-supplied context strings instead: they are exactly what the
++	 * detector asked about.
++	 */
++	if (marble_is_app_uid() && tclass == SECCLASS_FILE &&
++	    strstr(scon, ":kernel:") && strstr(tcon, ":adb_data_file"))
++		avd.allowed &= ~1U;	/* file class: read */
++
 +	/*
 +	 * marble: DirtySepolicy-style oracles ask the live policy whether
 +	 * privileged edges exist and treat "allowed" as root evidence. When a
@@ -295,7 +311,7 @@ index 6fe9d0cea418..b5822797ba6e 100644
  	length = scnprintf(buf, SIMPLE_TRANSACTION_LIMIT,
  			  "%x %x %x %x %u %x",
  			  avd.allowed, 0xffffffff,
-@@ -1024,6 +1163,11 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
+@@ -1024,6 +1179,11 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
  		objname = namebuf;
  	}
  
@@ -307,7 +323,7 @@ index 6fe9d0cea418..b5822797ba6e 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -1090,6 +1234,11 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
+@@ -1090,6 +1250,11 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
@@ -319,7 +335,7 @@ index 6fe9d0cea418..b5822797ba6e 100644
  	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
  	if (length)
  		goto out;
-@@ -1216,6 +1365,11 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
+@@ -1216,6 +1381,11 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
  	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
  		goto out;
  
